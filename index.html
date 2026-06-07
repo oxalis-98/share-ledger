@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <base target="_top">
+    <script>
+      // Google Apps Scriptのシステム通信ログ（Net state changed...）を非表示にする
+      (function() {
+        const suppressPatterns = [/Net state changed/, /warden/];
+        ['log', 'info', 'warn', 'debug'].forEach(method => {
+          const original = console[method];
+          if (original) {
+            console[method] = function(...args) {
+              if (args[0] && typeof args[0] === 'string') {
+                if (suppressPatterns.some(p => p.test(args[0]))) {
+                  return;
+                }
+              }
+              original.apply(console, args);
+            };
+          }
+        });
+      })();
+    </script>
+    <title>共同家計簿 App</title>
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons via CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Chart.js via CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- CryptoJS via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    
+    <!-- CSSの読み込み -->
+    <?!= include('css'); ?>
+    
+    <!-- テーマ初期設定（フラッシュ防止） -->
+    <script>
+      (function() {
+        const savedTheme = localStorage.getItem('theme') || 'system';
+        if (savedTheme !== 'system') {
+          document.documentElement.setAttribute('data-theme', savedTheme);
+        }
+      })();
+    </script>
+    
+    <!-- サーバー側データベースタイムスタンプの埋め込み -->
+    <script>
+      window.initialDbLastUpdated = "<?= dbLastUpdated ?>";
+    </script>
+  </head>
+  <body>
+    <!-- アプリ全体のコンテナ -->
+    <div class="app-container">
+      
+      <!-- ヘッダー -->
+      <header class="app-header">
+        <div class="header-logo">
+          <span class="logo-emoji">
+            <svg width="32" height="32" viewBox="0 0 144 144" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
+              <g transform="matrix(1,0,0,1,-707.83062,-749.72693)">
+                <g>
+                  <clipPath id="_clip1">
+                    <path d="M851.566,785.661L851.566,857.528C851.566,877.36 835.464,893.462 815.632,893.462L743.764,893.462C723.932,893.462 707.831,877.36 707.831,857.528L707.831,785.661C707.831,765.828 723.932,749.727 743.764,749.727L815.632,749.727C835.464,749.727 851.566,765.828 851.566,785.661Z"/>
+                  </clipPath>
+                  <g clip-path="url(#_clip1)">
+                    <path d="M851.566,785.661L851.566,857.528C851.566,877.36 835.464,893.462 815.632,893.462L743.764,893.462C723.932,893.462 707.831,877.36 707.831,857.528L707.831,785.661C707.831,765.828 723.932,749.727 743.764,749.727L815.632,749.727C835.464,749.727 851.566,765.828 851.566,785.661Z" style="fill:white;"/>
+                    <g transform="matrix(1.212529,0,0,1.212529,-176.162038,-188.221211)">
+                      <path d="M729.061,863.306C729.053,863.022 729.049,862.738 729.049,862.453L729.049,803.182C729.049,786.826 742.328,773.547 758.684,773.547L817.955,773.547C821.208,773.547 824.339,774.072 827.268,775.042C827.249,775.187 827.229,775.331 827.206,775.475C826.276,781.288 827.866,787.222 831.579,791.791C833.659,794.371 834.905,797.651 834.905,801.22C834.905,804.789 833.659,808.069 831.578,810.649C827.866,815.218 826.276,821.152 827.207,826.965C827.718,830.24 827.158,833.703 825.373,836.794C823.589,839.885 820.869,842.103 817.778,843.296C812.278,845.397 807.934,849.742 805.834,855.241C804.64,858.332 802.422,861.052 799.331,862.836C796.24,864.621 792.777,865.182 789.502,864.67C783.689,863.739 777.755,865.33 773.186,869.042C770.606,871.122 767.326,872.368 763.757,872.368C760.188,872.368 756.908,871.122 754.328,869.042C749.759,865.329 743.825,863.74 738.012,864.67C735.044,865.134 731.921,864.716 729.061,863.306Z" style="fill:rgb(255,247,177);"/>
+                    </g>
+                    <g>
+                      <g transform="matrix(1,0,0,1,33.503058,67.589056)">
+                        <path d="M723.426,825.873C722.881,825.114 722.347,824.312 721.824,823.464C719.657,819.946 718.926,815.641 717.146,810.386C716.438,808.295 717.57,805.373 717.984,803.081C718.895,798.047 720.045,794.114 726.801,795.004C730.222,795.454 733.103,792.262 733.103,792.262C733.103,792.262 741.265,780.132 743.597,776.341C747.04,770.742 754.101,761.292 754.627,757.393C755.527,750.722 758.097,736.867 765.477,734.631C766.691,734.263 766.102,738.701 771.342,740.549C774.525,741.672 774.692,750.628 776.736,752.076C778.315,753.194 783.533,758.934 787.576,756.804C802.238,749.082 803.97,730.516 809.82,732.141C813.941,733.286 815.927,742.377 818.062,756.775L818.062,789.939C818.062,809.771 801.961,825.873 782.129,825.873L723.426,825.873Z" style="fill:rgb(255,242,243);"/>
+                      </g>
+                      <g transform="matrix(1,0,0,1,33.503058,67.589056)">
+                        <path d="M719.23,810.406C719.219,811.555 718.277,812.48 717.127,812.47C715.977,812.459 715.053,811.517 715.063,810.367C715.063,810.367 715.141,803.925 716.906,799.404C717.852,796.978 719.329,795.111 721.222,794.396C723.717,793.452 725.599,793.111 727.238,792.8C728.555,792.55 729.683,792.347 730.902,791.67C731.197,791.506 731.371,791.133 731.614,790.698C732.064,789.896 732.508,788.876 733.046,787.705C734.838,783.802 737.543,778.39 743.868,773.396C744.77,772.684 746.082,772.838 746.794,773.74C747.507,774.643 747.352,775.954 746.45,776.666C739.826,781.896 737.68,787.677 736.036,791.176C735.053,793.271 734.062,794.681 732.925,795.312C731.582,796.058 730.33,796.422 728.953,796.709C727.278,797.058 725.38,797.278 722.695,798.293C722.162,798.495 721.784,798.986 721.439,799.561C720.922,800.42 720.543,801.485 720.247,802.593C719.265,806.265 719.23,810.406 719.23,810.406Z" style="fill:rgb(41,13,0);"/>
+                      </g>
+                      <g transform="matrix(1,0,0,1,33.503058,67.589056)">
+                        <path d="M756.32,757.746C756.383,758.894 755.502,759.877 754.354,759.94C753.205,760.003 752.222,759.122 752.159,757.974C751.91,753.426 753.553,748.376 755.678,743.969C758.743,737.61 762.739,732.616 762.739,732.616C763.366,731.831 764.463,731.606 765.349,732.08C765.349,732.08 774.882,737.058 778.749,751.538C779.046,752.649 778.385,753.792 777.274,754.089C776.163,754.385 775.02,753.724 774.724,752.613C772.281,743.47 767.312,738.664 764.843,736.756C763.521,738.596 761.292,741.917 759.431,745.778C757.612,749.552 756.106,753.852 756.32,757.746Z" style="fill:rgb(41,13,0);"/>
+                      </g>
+                      <g transform="matrix(1,0,0,1,33.503058,67.589056)">
+                        <path d="M818.062,761.413C818.021,761.419 817.98,761.423 817.938,761.426C816.791,761.509 815.792,760.646 815.709,759.499C814.652,744.972 811.563,738.153 809.891,735.449C807.203,738.882 801.555,745.967 796.53,751.421C793.413,754.804 790.491,757.558 788.595,758.621C787.593,759.183 786.322,758.826 785.759,757.823C785.197,756.82 785.554,755.549 786.557,754.987C788.222,754.053 790.728,751.569 793.466,748.598C800.24,741.245 808.165,730.876 808.165,730.876C808.777,730.076 809.873,729.828 810.769,730.286C810.769,730.286 815.245,732.283 818.062,745.653L818.062,761.413Z" style="fill:rgb(41,13,0);"/>
+                      </g>
+                      <g transform="matrix(1.530526,0,0,1.530526,-414.117907,-456.458241)">
+                        <circle cx="782.803" cy="857.347" r="1.91" style="fill:rgb(41,13,0);"/>
+                      </g>
+                      <g transform="matrix(1.530526,0,0,1.530526,-391.211809,-453.534256)">
+                        <circle cx="782.803" cy="857.347" r="1.91" style="fill:rgb(41,13,0);"/>
+                      </g>
+                      <g transform="matrix(0.788694,0,0,0.688543,186.908299,320.274272)">
+                        <path d="M727.415,804.868C726.191,807.587 725.88,808.485 726.125,811.573" style="fill:none;stroke:rgb(41,13,0);stroke-width:4.22px;"/>
+                      </g>
+                      <g transform="matrix(0.774377,-0.183389,0.106534,0.676043,118.073629,465.651956)">
+                        <path d="M727.415,804.868C726.191,807.587 725.88,808.485 726.125,811.573" style="fill:none;stroke:rgb(41,13,0);stroke-width:4.38px;"/>
+                      </g>
+                      <path d="M794.018,824.067C792.947,816.061 798.136,809.38 798.765,809.284C799.717,809.139 803.208,812.552 805.438,821.594C805.954,823.687 794.325,826.368 794.018,824.067Z" style="fill:rgb(245,210,212);"/>
+                      <g transform="matrix(1,0,0,1,41.154314,3.553361)">
+                        <path d="M789.448,822.39C789.234,816.909 801.046,805.391 802.114,805.727C803.308,806.102 806.362,814.224 804.682,823.384C804.015,827.02 789.539,824.71 789.448,822.39Z" style="fill:rgb(245,210,212);"/>
+                      </g>
+                    </g>
+                    <g transform="matrix(0.945323,0,0,0.945323,39.12019,133.902685)">
+                      <path d="M780.186,715.533C775.986,715.633 769.286,715.733 762.186,715.733C761.786,715.733 761.586,715.533 761.586,715.133L761.586,711.833C761.586,708.533 764.586,705.533 765.386,705.533C769.286,705.533 775.986,705.633 780.186,705.633C782.386,705.633 783.486,704.233 783.486,702.833C783.486,701.533 782.386,700.233 780.286,700.233L780.186,700.233C777.286,700.233 773.286,700.333 768.886,700.333C768.686,700.333 768.486,700.233 768.486,700.133C768.486,700.033 768.586,699.933 768.686,699.733C775.086,690.333 782.886,678.333 786.386,672.733C786.786,672.133 786.886,671.533 786.886,671.033C786.886,669.233 785.186,667.733 783.486,667.733C782.486,667.733 781.486,668.233 780.886,669.433C776.986,676.633 767.986,690.733 761.586,699.933C761.386,700.233 761.186,700.433 760.686,700.433L756.186,700.433C755.686,700.333 755.586,700.333 755.286,699.933C748.286,689.433 739.886,676.633 735.886,669.533C735.186,668.233 733.986,667.733 732.986,667.733C731.386,667.733 729.886,668.933 729.886,670.633C729.886,671.233 730.086,672.033 730.586,672.733C734.686,678.933 748.586,700.133 748.586,700.233C748.586,700.333 748.386,700.333 748.086,700.333C743.186,700.333 738.886,700.333 736.086,700.233L735.986,700.233C734.086,700.233 733.086,701.633 733.086,702.933C733.086,704.333 734.086,705.633 735.986,705.633L735.986,705.633C740.686,705.433 745.886,705.433 751.386,705.433C752.586,705.433 755.286,709.633 755.286,711.833L755.286,715.133C755.286,715.533 754.986,715.733 754.586,715.733C747.086,715.733 740.086,715.633 736.086,715.533L735.986,715.533C734.086,715.533 733.086,716.933 733.086,718.333C733.086,719.733 734.086,721.133 735.986,721.133L736.086,721.133C741.586,720.933 747.986,720.933 754.786,720.933C755.186,720.933 755.286,721.133 755.286,721.433L755.286,737.433C755.286,739.633 756.886,740.733 758.486,740.733C760.086,740.733 761.686,739.633 761.686,737.433L761.686,721.533C761.686,721.233 761.786,720.933 762.286,720.933C768.086,720.933 774.086,721.033 780.186,721.133C782.386,721.133 783.386,719.733 783.386,718.333C783.386,716.933 782.386,715.533 780.286,715.533L780.186,715.533Z" style="fill:rgb(41,13,0);fill-rule:nonzero;stroke:rgb(41,13,0);stroke-width:1.06px;stroke-linecap:butt;stroke-miterlimit:2;"/>
+                    </g>
+                  </g>
+                </g>
+              </g>
+            </svg>
+          </span>
+          <h1>帳簿</h1>
+        </div>
+        
+        <div class="header-controls">
+          <!-- 手動同期ボタン -->
+          <button class="icon-btn" onclick="forceSync()" id="sync-btn" title="最新データを取得">
+            <i data-lucide="refresh-cw"></i>
+          </button>
+          
+          <!-- テーマ切り替えボタン -->
+          <button class="icon-btn" onclick="cycleTheme()" id="theme-btn" title="テーマを切り替え">
+            <i data-lucide="monitor" id="theme-icon"></i>
+          </button>
+          
+          <!-- 設定ボタン -->
+          <button class="icon-btn settings-trigger" onclick="openModal('settings-modal')" title="設定">
+            <i data-lucide="settings"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- ビュー切り替えタブ -->
+      <div class="view-tabs">
+        <button class="view-tab active" id="tab-monthly" onclick="switchView('monthly')">
+          <i data-lucide="calendar"></i> 月次帳簿
+        </button>
+        <button class="view-tab" id="tab-yearly" onclick="switchView('yearly')">
+          <i data-lucide="bar-chart-2"></i> 年間ダッシュボード
+        </button>
+      </div>
+
+      <!-- メインコンテンツ領域 -->
+      <!-- 1. 月次ビュー -->
+      <div id="monthly-view" class="view-content active">
+        <main class="app-main">
+          
+          <!-- 左列：ダッシュボード＆集計 -->
+          <section class="dashboard-section">
+            <div class="month-selector-wrapper" style="position: relative;">
+              <button class="icon-btn" onclick="adjustMonth(-1)" title="前月">
+                <i data-lucide="chevron-left"></i>
+              </button>
+              <div id="month-picker-trigger" class="month-picker-trigger" title="年月を選択">
+                <span id="month-picker-display">2026年06月</span>
+                <i data-lucide="calendar" class="month-picker-icon"></i>
+              </div>
+              <div id="month-picker-popup" class="month-picker-popup">
+                <div class="month-picker-header">
+                  <button type="button" class="month-picker-nav-btn" id="mp-prev-year">
+                    <i data-lucide="chevron-left"></i>
+                  </button>
+                  <span id="mp-current-year">2026</span>
+                  <button type="button" class="month-picker-nav-btn" id="mp-next-year">
+                    <i data-lucide="chevron-right"></i>
+                  </button>
+                </div>
+                <div class="month-picker-grid" id="month-picker-grid">
+                  <!-- 1〜12月のグリッドが動的に挿入される -->
+                </div>
+                <div class="month-picker-footer">
+                  <button type="button" class="month-picker-today-btn" id="mp-today-btn">今月</button>
+                </div>
+              </div>
+              <input type="month" id="month-input" class="month-input" style="display: none;">
+              <button class="icon-btn" onclick="adjustMonth(1)" title="翌月">
+                <i data-lucide="chevron-right"></i>
+              </button>
+            </div>
+            <!-- クイック統計カード -->
+            <div class="stats-grid">
+              <div class="stat-card">
+                <div class="stat-header">
+                  <span class="stat-title">当月合計支出</span>
+                  <i data-lucide="credit-card" class="stat-icon text-blue"></i>
+                </div>
+                <div class="stat-value" id="stat-total">¥0</div>
+              </div>
+              
+              <div class="stat-card">
+                <div class="stat-header">
+                  <span class="stat-title">ユーザー数</span>
+                  <i data-lucide="users" class="stat-icon text-purple"></i>
+                </div>
+                <div class="stat-value" id="stat-users-count">0</div>
+              </div>
+            </div>
+
+            <!-- 精算パネル (シンプルデザイン) -->
+            <div class="panel-card settlement-panel">
+              <div class="panel-header">
+                <h2><i data-lucide="arrow-right-left"></i> 今月の精算額</h2>
+              </div>
+              <div class="settlement-loading" id="settlement-loading">
+                <div class="spinner"></div>
+              </div>
+              <div class="settlement-results" id="settlement-results" style="display:none;">
+                <!-- 動的に生成 -->
+              </div>
+              
+              <!-- 清算記録の表示エリア -->
+              <div id="monthly-settlement-status-container" class="settlement-status-container" style="display:none;">
+                <!-- 動的に生成 -->
+              </div>
+            </div>
+
+            <!-- カテゴリ内訳グラフ -->
+            <div class="panel-card chart-panel">
+              <div class="panel-header">
+                <h2><i data-lucide="pie-chart"></i> 支出内訳</h2>
+              </div>
+              <div class="chart-container">
+                <canvas id="categoryChart"></canvas>
+              </div>
+            </div>
+          </section>
+
+          <!-- 右列：フォーム＆履歴 -->
+          <section class="ledger-section">
+            
+            <!-- 取引登録フォーム -->
+            <div class="panel-card form-panel">
+              <div class="panel-header flex-between" style="flex-wrap: wrap; gap: 8px;">
+                <h2><i data-lucide="plus-circle"></i> 取引を記録</h2>
+                <div class="ocr-action-wrapper" style="display: flex; gap: 8px; flex-wrap: wrap;">
+                  <input type="file" id="receipt-upload" accept="image/*,application/pdf" multiple style="display: none;" onchange="handleReceiptUpload(event)">
+                  <button class="btn btn-secondary btn-sm" onclick="document.getElementById('receipt-upload').click()">
+                    <i data-lucide="scan"></i> レシート読込 (Gemini)
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="openDriveFilePicker()">
+                    <i data-lucide="hard-drive"></i> ドライブから選択
+                  </button>
+                </div>
+              </div>
+              
+              <form id="tx-form" onsubmit="submitTransaction(event)">
+                <!-- 編集用ID (新規登録時は空) -->
+                <input type="hidden" id="tx-id">
+
+                <!-- 1. お店 -->
+                <div class="form-group">
+                  <label for="tx-title">お店（店名・商品） <span class="required">*</span></label>
+                  <input type="text" id="tx-title" placeholder="例: セイムス、ハナマサ" required>
+                </div>
+
+                <!-- 2. 日付 (カードのスライダーUI) -->
+                <div class="form-group">
+                  <label>日付 <span class="required">*</span></label>
+                  <div class="date-slider-wrapper">
+                    <div class="date-picker-trigger-wrapper" id="calendar-trigger-wrapper">
+                      <button type="button" class="btn btn-secondary date-picker-trigger" id="custom-calendar-trigger" title="カレンダーから選択">
+                        <i data-lucide="calendar"></i>
+                      </button>
+                      
+                      <!-- オリジナルカレンダーポップアップ -->
+                      <div id="custom-calendar-popup" class="custom-calendar-popup">
+                        <div class="calendar-header">
+                          <button type="button" class="calendar-nav-btn" id="cal-prev-month" title="前月">
+                            <i data-lucide="chevron-left"></i>
+                          </button>
+                          <span id="calendar-month-year">2026年6月</span>
+                          <button type="button" class="calendar-nav-btn" id="cal-next-month" title="翌月">
+                            <i data-lucide="chevron-right"></i>
+                          </button>
+                        </div>
+                        <div class="calendar-weekdays">
+                          <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+                        </div>
+                        <div class="calendar-days" id="calendar-days-container">
+                          <!-- JSで動的に生成 -->
+                        </div>
+                      </div>
+                    </div>
+                    <div id="date-slider" class="date-slider">
+                      <!-- JSで動的に過去の日付カードを生成 -->
+                    </div>
+                  </div>
+                  <input type="date" id="tx-date" required style="display: none;">
+                </div>
+
+                <!-- 3. 項目（カテゴリ） -->
+                <div class="form-group">
+                  <label>項目（カテゴリ） <span class="required">*</span></label>
+                  <div id="tx-category-container" class="choice-chips-container"></div>
+                  <input type="hidden" id="tx-category" required>
+                </div>
+
+                <!-- 4. 支払い者 -->
+                <div class="form-group">
+                  <label>支払い者 <span class="required">*</span></label>
+                  <div id="tx-paid-by-container" class="choice-chips-container"></div>
+                  <input type="hidden" id="tx-paid-by" required>
+                </div>
+
+                 <!-- 5. 金額 -->
+                <div class="form-group">
+                  <label for="tx-amount">金額 (円) <span class="required">*</span></label>
+                  <div class="amount-input-wrapper">
+                    <input type="text" id="tx-amount" inputmode="numeric" pattern="[0-9]*" placeholder="金額を入力" required>
+                    <button type="button" class="btn btn-secondary calculator-trigger" id="calculator-trigger" title="電卓を起動">
+                      <i data-lucide="calculator"></i>
+                    </button>
+                    
+                    <!-- 電卓ポップアップ -->
+                    <div id="calculator-popup" class="calculator-popup">
+                      <div class="calc-display-area">
+                        <div class="calc-expression" id="calc-expression"></div>
+                        <div class="calc-result" id="calc-result">0</div>
+                      </div>
+                      <div class="calc-grid">
+                        <button type="button" class="calc-btn op" data-val="C">C</button>
+                        <button type="button" class="calc-btn op" data-val="back">⌫</button>
+                        <button type="button" class="calc-btn tax-btn" data-val="tax8">+8%</button>
+                        <button type="button" class="calc-btn tax-btn" data-val="tax10">+10%</button>
+                        
+                        <button type="button" class="calc-btn num" data-val="7">7</button>
+                        <button type="button" class="calc-btn num" data-val="8">8</button>
+                        <button type="button" class="calc-btn num" data-val="9">9</button>
+                        <button type="button" class="calc-btn op" data-val="/">÷</button>
+                        
+                        <button type="button" class="calc-btn num" data-val="4">4</button>
+                        <button type="button" class="calc-btn num" data-val="5">5</button>
+                        <button type="button" class="calc-btn num" data-val="6">6</button>
+                        <button type="button" class="calc-btn op" data-val="*">×</button>
+                        
+                        <button type="button" class="calc-btn num" data-val="1">1</button>
+                        <button type="button" class="calc-btn num" data-val="2">2</button>
+                        <button type="button" class="calc-btn num" data-val="3">3</button>
+                        <button type="button" class="calc-btn op" data-val="-">-</button>
+                        
+                        <button type="button" class="calc-btn num" data-val="0">0</button>
+                        <button type="button" class="calc-btn num" data-val=".">.</button>
+                        <button type="button" class="calc-btn op" data-val="=">=</button>
+                        <button type="button" class="calc-btn op" data-val="+">+</button>
+                      </div>
+                      <div class="calc-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" id="calc-close-btn">閉じる</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="calc-apply-btn">反映</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 6. 立て替え（精算・立替タイプ ＆ 負担メンバー） -->
+                <div class="form-row">
+                  <div class="form-group col-6">
+                    <label>精算・立替タイプ <span class="required">*</span></label>
+                    <div id="tx-split-type-container" class="choice-chips-container"></div>
+                    <input type="hidden" id="tx-split-type" required>
+                  </div>
+                  <div class="form-group col-6" id="beneficiaries-group">
+                    <label id="beneficiaries-label">負担するメンバー（複数選択可） <span class="required">*</span></label>
+                    <div id="tx-beneficiaries-container" class="choice-chips-container"></div>
+                    <input type="hidden" id="tx-beneficiaries" required>
+                  </div>
+                </div>
+
+                <!-- 7. メモ -->
+                <div class="form-group">
+                  <label for="tx-memo">メモ</label>
+                  <input type="text" id="tx-memo" placeholder="メモ書きがあれば入力">
+                </div>
+
+                <div class="form-actions">
+                  <button type="button" class="btn btn-secondary" id="cancel-btn" onclick="cancelEdit()" style="display: none;">
+                    キャンセル
+                  </button>
+                  <button type="submit" class="btn btn-primary" id="submit-btn">
+                    <i data-lucide="check"></i> <span id="submit-btn-text">登録する</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <!-- 取引明細履歴 (シンプルなテーブルビュー) -->
+            <div class="panel-card history-panel">
+              <div class="panel-header" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between;">
+                <h2 style="margin: 0; display: flex; align-items: center; gap: 8px;"><i data-lucide="list"></i> 取引履歴</h2>
+                <div class="filter-controls-wrapper" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  <button id="filter-btn" class="icon-btn filter-trigger-btn" onclick="openFilterModal()" title="フィルター条件を設定">
+                    <i data-lucide="filter" style="width: 14px; height: 14px;"></i>
+                  </button>
+                  <div id="active-filters-container" class="active-filters-list" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;"></div>
+                </div>
+              </div>
+              
+              <div class="table-responsive">
+                <table class="ledger-table">
+                  <thead>
+                    <tr>
+                      <th>名前</th>
+                      <th>日付</th>
+                      <th>項目</th>
+                      <th>支払い</th>
+                      <th class="text-right">金額</th>
+                      <th>精算タイプ</th>
+                      <th>負担メンバー</th>
+                      <th class="action-col"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="history-tbody">
+                    <!-- JSで動的に追加 -->
+                  </tbody>
+                </table>
+              </div>
+              <div id="no-history-msg" class="empty-state" style="display: none;">
+                取引データがありません。
+              </div>
+            </div>
+
+          </section>
+        </main>
+      </div>
+
+      <!-- 2. 年間ビュー -->
+      <div id="yearly-view" class="view-content">
+        <div class="yearly-dashboard-wrapper">
+          <!-- 上部コントロール：年の切り替え -->
+          <div class="yearly-header">
+            <div class="year-selector-wrapper">
+              <button class="icon-btn" onclick="adjustYear(-1)" title="前年">
+                <i data-lucide="chevron-left"></i>
+              </button>
+              <span id="yearly-year-display" class="year-display">2026年</span>
+              <button class="icon-btn" onclick="adjustYear(1)" title="翌年">
+                <i data-lucide="chevron-right"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- スタッツカード -->
+          <div class="yearly-stats-grid">
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-title">年間合計支出</span>
+                <i data-lucide="credit-card" class="stat-icon text-blue"></i>
+              </div>
+              <div class="stat-value" id="yearly-stat-total">¥0</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-header">
+                <span class="stat-title">月平均支出</span>
+                <i data-lucide="trending-up" class="stat-icon text-purple"></i>
+              </div>
+              <div class="stat-value" id="yearly-stat-average">¥0</div>
+            </div>
+          </div>
+
+          <!-- メイングリッド（左右2カラム） -->
+          <div class="yearly-grid">
+            <!-- 左側：月別支出推移グラフ ＆ カテゴリグラフ -->
+            <div class="yearly-charts-col">
+              <div class="panel-card">
+                <div class="panel-header">
+                  <h2><i data-lucide="bar-chart-3"></i> 月別支出推移</h2>
+                </div>
+                <div class="chart-container yearly-trend-chart-container">
+                  <canvas id="yearlyTrendChart"></canvas>
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-header">
+                  <h2><i data-lucide="pie-chart"></i> 年間カテゴリ内訳</h2>
+                </div>
+                <div class="chart-container">
+                  <canvas id="yearlyCategoryChart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <!-- 右側：年間バランス ＆ 月別データテーブル -->
+            <div class="yearly-tables-col">
+              <!-- 年間累計個人バランス -->
+              <div class="panel-card">
+                <div class="panel-header">
+                  <h2><i data-lucide="arrow-right-left"></i> 年間累計バランス</h2>
+                </div>
+                <div class="settlement-results" id="yearly-balance-results">
+                  <!-- 動的に生成 -->
+                </div>
+              </div>
+
+              <!-- 月別集計表 -->
+              <div class="panel-card">
+                <div class="panel-header">
+                  <h2><i data-lucide="table"></i> 月別データ一覧</h2>
+                </div>
+                <div class="table-responsive">
+                  <table class="ledger-table">
+                    <thead>
+                      <tr id="yearly-table-header">
+                        <th>月</th>
+                        <th>合計支出</th>
+                        <!-- 動的にユーザー列を追加 -->
+                      </tr>
+                    </thead>
+                    <tbody id="yearly-table-tbody">
+                      <!-- 動的に生成 -->
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- モーダルダイアログ領域 -->
+    <!-- ========================================== -->
+
+    <!-- 1. 設定モーダル -->
+    <div id="settings-modal" class="modal-overlay">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3><i data-lucide="settings"></i> アプリ設定</h3>
+          <button class="icon-btn close-btn" onclick="closeModal('settings-modal')">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">
+            アプリの動作に必要なAPIキーを設定します。設定したキーはあなたのGoogleアカウント（UserProperties）にのみ安全に保管されます。
+          </p>
+          
+          <div class="form-group">
+            <label for="settings-gemini-key">Gemini APIキー</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="settings-gemini-key" placeholder="AI Studio of APIキーを入力してください (AIzaSy...)">
+              <button class="icon-btn" type="button" onclick="togglePasswordVisibility('settings-gemini-key')">
+                <i data-lucide="eye" id="settings-gemini-key-eye"></i>
+              </button>
+            </div>
+            <small class="help-text">
+              レシートのOCR機能に使用します。<a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a> で無料で作成できます。
+            </small>
+          </div>
+          
+          <div class="form-group" style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 16px;">
+            <label for="settings-theme">表示テーマ設定</label>
+            <select id="settings-theme" onchange="applyTheme(this.value)">
+              <option value="system">💻 システム設定（デフォルト）</option>
+              <option value="light">☀️ ライトモード</option>
+              <option value="dark">🌙 ダークモード</option>
+            </select>
+          </div>
+          
+          <div class="form-group" style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 16px;">
+            <label>データ操作</label>
+            <input type="file" id="csv-upload" accept=".csv" style="display: none;" onchange="handleCsvUpload(event)">
+            <button class="btn btn-secondary" onclick="document.getElementById('csv-upload').click(); closeModal('settings-modal');" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 8px;">
+              <i data-lucide="upload"></i> CSVファイルからインポート
+            </button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeModal('settings-modal')">キャンセル</button>
+          <button class="btn btn-primary" onclick="saveSettings()">設定を保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 取引フィルターモーダル -->
+    <div id="filter-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 480px; width: 90%;">
+        <div class="modal-header">
+          <h3><i data-lucide="filter"></i> 取引フィルター</h3>
+          <button type="button" class="icon-btn close-btn" onclick="closeModal('filter-modal')">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="modal-body" style="display: flex; flex-direction: column; gap: 16px;">
+          <p class="modal-desc" style="margin-bottom: 8px;">表示する取引明細を絞り込みます（複数選択可）。何も選択しない場合は全表示になります。</p>
+          
+          <div class="form-group">
+            <label style="font-weight: 600; margin-bottom: 8px; display: block;">項目（カテゴリ）</label>
+            <div id="filter-category-container" class="chips-container filter-chips-wrapper" style="display: flex; flex-wrap: wrap; gap: 8px; max-height: 150px; overflow-y: auto; padding: 4px;">
+              <!-- JSで動的に構築 -->
+            </div>
+            <!-- ChoiceChips用の隠しinput -->
+            <input type="hidden" id="filter-category-hidden" value="">
+          </div>
+          
+          <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 16px;">
+            <label style="font-weight: 600; margin-bottom: 8px; display: block;">支払い（メンバー）</label>
+            <div id="filter-paid-by-container" class="chips-container filter-chips-wrapper" style="display: flex; flex-wrap: wrap; gap: 8px; padding: 4px;">
+              <!-- JSで動的に構築 -->
+            </div>
+            <!-- ChoiceChips用の隠しinput -->
+            <input type="hidden" id="filter-paid-by-hidden" value="">
+          </div>
+        </div>
+        <div class="modal-footer" style="display: flex; justify-content: space-between; width: 100%;">
+          <button type="button" class="btn btn-secondary" onclick="clearFilterSelection()" style="padding: 8px 16px;">すべてクリア</button>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('filter-modal')">キャンセル</button>
+            <button type="button" class="btn btn-primary" onclick="applyFilters()" style="padding: 8px 20px;">適用する</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Google Drive ファイル選択モーダル -->
+    <div id="drive-picker-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 520px; width: 90%;">
+        <div class="modal-header">
+          <h3><i data-lucide="hard-drive"></i> Googleドライブから選択</h3>
+          <button type="button" class="close-btn" onclick="closeModal('drive-picker-modal')" style="background: none; border: none; cursor: pointer; color: var(--text-secondary); display: flex; align-items: center; justify-content: center;">
+            <i data-lucide="x" style="width: 20px; height: 20px;"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">Googleドライブのスキャンデータや画像を選択して、Geminiで解析します。</p>
+          
+          <!-- 検索バー -->
+          <div class="drive-picker-search" style="display: flex; gap: 8px; margin-bottom: 12px;">
+            <input type="text" id="drive-search-input" placeholder="ファイル名で検索（例: スキャン）" style="flex: 1; padding: 8px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-input); color: var(--text-main); font-size: 0.9rem;" onkeydown="if(event.key==='Enter') searchDriveFiles()">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="searchDriveFiles()" style="padding: 8px 16px;">検索</button>
+          </div>
+
+          <!-- クイックフィルタ -->
+          <div class="drive-quick-filters" style="display: flex; gap: 6px; margin-bottom: 12px;">
+            <button type="button" class="btn btn-xs filter-btn active" id="filter-all" onclick="setDriveFilter('all')" style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px;">すべて</button>
+            <button type="button" class="btn btn-xs filter-btn" id="filter-pdf" onclick="setDriveFilter('pdf')" style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px;">PDFのみ</button>
+            <button type="button" class="btn btn-xs filter-btn" id="filter-image" onclick="setDriveFilter('image')" style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px;">画像のみ</button>
+          </div>
+          
+          <!-- ファイルリスト本体 -->
+          <div id="drive-file-list" class="drive-file-list" style="max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; min-height: 100px;">
+            <!-- JSで動的に構築される -->
+          </div>
+          
+          <!-- ローディング表示 -->
+          <div id="drive-picker-loading" style="display: none; justify-content: center; align-items: center; padding: 40px 0;">
+            <div class="spinner" style="width: 24px; height: 24px; border: 3px solid rgba(46,170,220,0.2); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+          </div>
+
+          <!-- データなし表示 -->
+          <div id="drive-picker-empty" style="display: none; text-align: center; color: var(--text-secondary); padding: 30px 0; font-size: 0.9rem;">
+            <i data-lucide="folder-open" style="width: 32px; height: 32px; margin-bottom: 8px; opacity: 0.5; display: inline-block;"></i>
+            <div>対象のファイルが見つかりませんでした。</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('drive-picker-modal')">キャンセル</button>
+          <button type="button" class="btn btn-primary" id="drive-picker-submit" onclick="analyzeSelectedDriveFile()" disabled>選択して解析</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. OCR処理中モーダル -->
+    <div id="ocr-loading-modal" class="modal-overlay no-close">
+      <div class="modal-card ocr-loading-card">
+        <div class="ocr-scan-container">
+          <div class="ocr-scan-line"></div>
+          <i data-lucide="scan" class="ocr-large-icon"></i>
+        </div>
+        <h3 id="ocr-loading-title">Geminiでレシートを解析中...</h3>
+        <p id="ocr-loading-desc">画像から店名、日付、金額、カテゴリを読み取っています。<br>数秒ほどお待ちください。</p>
+      </div>
+    </div>
+
+    <!-- 2b. レシート一括解析プレビューモーダル -->
+    <div id="receipt-batch-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 800px; width: 90%;">
+        <div class="modal-header">
+          <h3><i data-lucide="scan"></i> レシート解析結果</h3>
+          <button class="icon-btn close-btn" onclick="closeModal('receipt-batch-modal')">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">
+            <span id="receipt-batch-count" style="font-weight: 600; color: var(--accent-blue);">0</span> 枚のレシートを解析しました。内容を確認して一括登録してください。
+          </p>
+
+          <!-- 一括設定カード -->
+          <div class="bulk-settings-card" style="display: flex; gap: 16px; padding: 12px 16px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 16px; align-items: center; flex-wrap: wrap;">
+            <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-secondary); display: flex; align-items: center; gap: 6px;">
+              <i data-lucide="check-square" style="width: 16px; height: 16px; color: var(--accent-blue);"></i> 一括設定:
+            </div>
+            <!-- 支払い者一括 -->
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span style="font-size: 0.8rem; color: var(--text-secondary);">支払い者</span>
+              <select id="bulk-paid-by" onchange="applyBulkSetting('paid-by')" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; outline: none; cursor: pointer;">
+                <option value="">（選択してください）</option>
+                <!-- JSで動的に追加 -->
+              </select>
+            </div>
+            <!-- 精算タイプ一括 -->
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span style="font-size: 0.8rem; color: var(--text-secondary);">タイプ</span>
+              <select id="bulk-split-type" onchange="applyBulkSetting('split-type')" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; outline: none; cursor: pointer;">
+                <option value="">（選択してください）</option>
+                <!-- JSで動的に追加 -->
+              </select>
+            </div>
+            <!-- 負担メンバー一括 -->
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span style="font-size: 0.8rem; color: var(--text-secondary);">負担メンバー</span>
+              <div id="bulk-beneficiaries-container" style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                <!-- JSで動的に追加 -->
+              </div>
+            </div>
+          </div>
+          
+          <div class="table-responsive" style="max-height: 50vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+            <table class="ledger-table" style="font-size: 0.8rem; width: 100%;">
+              <thead>
+                <tr>
+                  <th style="min-width: 140px;">店名</th>
+                  <th style="min-width: 105px;">日付</th>
+                  <th style="min-width: 100px;">カテゴリ</th>
+                  <th style="min-width: 85px;">金額</th>
+                  <th style="min-width: 90px;">支払い者</th>
+                  <th style="min-width: 90px;">タイプ</th>
+                  <th style="min-width: 150px;">負担メンバー</th>
+                  <th style="width: 45px; text-align: center;">削除</th>
+                </tr>
+              </thead>
+              <tbody id="receipt-batch-tbody">
+                <!-- 動的に生成 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeModal('receipt-batch-modal')">キャンセル</button>
+          <button class="btn btn-primary" onclick="confirmReceiptBatchImport()" id="receipt-batch-import-btn">一括登録</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. 清算状況の編集モーダル -->
+    <div id="settlement-status-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 480px; width: 90%;">
+        <div class="modal-header">
+          <h3><i data-lucide="edit-3"></i> 清算記録の編集</h3>
+          <button class="icon-btn close-btn" onclick="closeModal('settlement-status-modal')">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <form id="settlement-status-form" onsubmit="submitSettlementStatus(event)">
+            <!-- 編集用のID (隠しフィールド) -->
+            <input type="hidden" id="settle-id-input">
+
+            <!-- 月 (読み取り専用) -->
+            <div class="form-group">
+              <label>対象月</label>
+              <input type="text" id="settle-month-display" readonly style="background-color: var(--bg-hover); color: var(--text-secondary); cursor: not-allowed;">
+            </div>
+
+            <!-- ステータス -->
+            <div class="form-group">
+              <label for="settle-status-input">ステータス <span class="required">*</span></label>
+              <select id="settle-status-input" onchange="onSettleStatusChange(this.value)" required style="width: 100%; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); padding: 8px;">
+                <!-- JSで動的に追加 -->
+              </select>
+            </div>
+
+            <!-- 支払い詳細エリア（ステータスが支払い済みの場合のみ表示） -->
+            <div id="settle-details-area" style="display: none; flex-direction: column; gap: 12px;">
+              <!-- 支払い日 -->
+              <div class="form-group" style="position: relative;">
+                <label for="settle-date-display-input">支払い日</label>
+                <div style="position: relative;">
+                  <input type="text" id="settle-date-display-input" readonly placeholder="日付を選択" style="width: 100%; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); padding: 8px; cursor: pointer; padding-right: 36px;">
+                  <i data-lucide="calendar" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--text-disabled); pointer-events: none;"></i>
+                  
+                  <!-- 精算用オリジナルカレンダーポップアップ -->
+                  <div id="settle-calendar-popup" class="custom-calendar-popup" style="left: 0; right: auto; top: calc(100% + 4px); z-index: 1050;">
+                    <div class="calendar-header">
+                      <button type="button" class="calendar-nav-btn" id="settle-cal-prev-month" title="前月">
+                        <i data-lucide="chevron-left"></i>
+                      </button>
+                      <span id="settle-calendar-month-year">2026年6月</span>
+                      <button type="button" class="calendar-nav-btn" id="settle-cal-next-month" title="翌月">
+                        <i data-lucide="chevron-right"></i>
+                      </button>
+                    </div>
+                    <div class="calendar-weekdays">
+                      <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+                    </div>
+                    <div class="calendar-days" id="settle-calendar-days-container">
+                      <!-- JSで動的に生成 -->
+                    </div>
+                  </div>
+                </div>
+                <input type="date" id="settle-date-input" style="display: none;">
+              </div>
+
+              <!-- 支払いパターン -->
+              <div class="form-group">
+                <label for="settle-pattern-input">支払いパターン</label>
+                <select id="settle-pattern-input" style="width: 100%; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); padding: 8px;">
+                  <!-- JSで動的に追加 -->
+                </select>
+              </div>
+
+              <!-- 支払額 -->
+              <div class="form-group">
+                <label for="settle-amount-input">支払額 (円)</label>
+                <input type="number" id="settle-amount-input" placeholder="金額を入力" style="width: 100%; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); padding: 8px;">
+              </div>
+
+              <!-- 支払い方法 -->
+              <div class="form-group">
+                <label for="settle-method-input">支払い方法</label>
+                <select id="settle-method-input" style="width: 100%; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); padding: 8px;">
+                  <option value="">選択してください</option>
+                  <!-- JSで動的に追加 -->
+                </select>
+              </div>
+            </div>
+
+            <!-- メモ -->
+            <div class="form-group">
+              <label for="settle-memo-input">メモ</label>
+              <textarea id="settle-memo-input" rows="3" placeholder="メモや清算の内訳などを入力" style="width:100%; background-color:var(--bg-input); border:1px solid var(--border-color); border-radius:var(--radius-sm); color:var(--text-primary); padding:8px; font-family:inherit; font-size:0.85rem; resize:vertical;"></textarea>
+            </div>
+            
+            <div class="form-actions" style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <button type="button" id="settle-delete-btn" class="btn btn-danger" onclick="deleteSettlementStatusFromModal()" style="display: none;">削除</button>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('settlement-status-modal')">キャンセル</button>
+                <button type="submit" class="btn btn-primary">記録を保存</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. CSVインポート確認モーダル -->
+    <div id="csv-preview-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 800px; width: 90%;">
+        <div class="modal-header">
+          <h3><i data-lucide="upload"></i> CSVインポート確認</h3>
+          <button class="icon-btn close-btn" onclick="closeModal('csv-preview-modal')">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">
+            以下の <span id="csv-import-count" style="font-weight: 600; color: var(--accent-blue);">0</span> 件のデータをインポートします。内容に問題がないか確認してください。
+          </p>
+          
+          <div class="table-responsive" style="max-height: 50vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+            <table class="ledger-table" style="font-size: 0.8rem; width: 100%;">
+              <thead>
+                <tr>
+                  <th>名前</th>
+                  <th>日付</th>
+                  <th>カテゴリ</th>
+                  <th>支払い者</th>
+                  <th>金額</th>
+                  <th>精算タイプ</th>
+                  <th>負担メンバー</th>
+                </tr>
+              </thead>
+              <tbody id="csv-preview-tbody">
+                <!-- 動的に生成 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeModal('csv-preview-modal')">キャンセル</button>
+          <button class="btn btn-primary" onclick="confirmImport()" id="csv-import-btn">インポート実行</button>
+        </div>
+      </div>
+    </div>
+    <!-- 開発・デバッグ用インコンソールUI (debug=trueの時のみJSで表示制御) -->
+    <div id="debug-console-panel" class="debug-console collapsed" style="display: none;">
+      <div class="debug-header">
+        <div class="debug-title">
+          <i data-lucide="terminal"></i>
+          <span>デバッグコンソール</span>
+          <span class="debug-count" id="debug-log-count">0</span>
+        </div>
+        <div class="debug-actions">
+          <select id="debug-filter-category" onchange="filterDebugLogs()" class="debug-select">
+            <option value="ALL">すべて</option>
+            <option value="API">API (通信)</option>
+            <option value="DATABASE">DATABASE (DB/キャッシュ)</option>
+            <option value="UI">UI (画面/操作)</option>
+            <option value="IMPORT">IMPORT (画像解析)</option>
+            <option value="ERROR">ERROR (例外/エラー)</option>
+          </select>
+          <button onclick="copyDebugLogs()" class="icon-btn" id="debug-copy-btn" title="ログをコピー">
+            <i data-lucide="copy" id="debug-copy-icon"></i>
+          </button>
+          <button onclick="clearDebugLogs()" class="icon-btn" title="ログをクリア">
+            <i data-lucide="trash-2"></i>
+          </button>
+          <button onclick="toggleDebugConsole()" class="icon-btn" title="コンソールを折りたたむ/展開">
+            <i data-lucide="chevrons-up" id="debug-toggle-icon"></i>
+          </button>
+        </div>
+      </div>
+      <div class="debug-body" id="debug-log-container">
+        <!-- ログ行がここに流し込まれます -->
+      </div>
+    </div>
+
+    <!-- JSの読み込み -->
+    <?!= include('js'); ?>
+  </body>
+</html>

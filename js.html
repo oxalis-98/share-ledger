@@ -1,0 +1,4310 @@
+<script>
+  // ==========================================
+  // 選択チップ (Choice Chips) コンポーネントの定義
+  // ==========================================
+  class ChoiceChips {
+    constructor(containerId, hiddenInputId, isMultiSelect = false, onChangeCallback) {
+      this.container = document.getElementById(containerId);
+      this.hiddenInput = document.getElementById(hiddenInputId);
+      this.isMultiSelect = isMultiSelect;
+      this.onChange = onChangeCallback;
+      this.options = [];
+      this.selectedValues = []; // 複数選択用の配列
+    }
+    
+    setOptions(options) {
+      this.options = options;
+      this.render();
+    }
+    
+    render() {
+      this.container.innerHTML = '';
+      
+      this.options.forEach(opt => {
+        const chip = document.createElement('div');
+        chip.className = 'choice-chip';
+        chip.textContent = opt;
+        
+        // 初期選択状態の判定
+        const isSelected = this.isMultiSelect 
+          ? this.selectedValues.includes(opt)
+          : this.hiddenInput.value === opt;
+          
+        if (isSelected) {
+          chip.classList.add('selected');
+        }
+        
+        chip.addEventListener('click', () => {
+          this.select(opt);
+        });
+        
+        this.container.appendChild(chip);
+      });
+    }
+    
+    select(value) {
+      if (this.isMultiSelect) {
+        // 複数選択モード
+        const idx = this.selectedValues.indexOf(value);
+        if (idx > -1) {
+          this.selectedValues.splice(idx, 1); // 選択解除
+        } else {
+          this.selectedValues.push(value); // 新規選択
+        }
+        this.hiddenInput.value = this.selectedValues.join(',');
+      } else {
+        // 単一選択モード
+        this.hiddenInput.value = value;
+      }
+      
+      // UIの選択表示を同期
+      this.container.querySelectorAll('.choice-chip').forEach(chip => {
+        const isSel = this.isMultiSelect
+          ? this.selectedValues.includes(chip.textContent)
+          : this.hiddenInput.value === chip.textContent;
+          
+        if (isSel) {
+          chip.classList.add('selected');
+        } else {
+          chip.classList.remove('selected');
+        }
+      });
+      
+      if (this.onChange) {
+        this.onChange(this.getValue());
+      }
+    }
+    
+    getValue() {
+      return this.isMultiSelect ? this.selectedValues.join(',') : this.hiddenInput.value;
+    }
+    
+    setValue(value) {
+      this.hiddenInput.value = value || '';
+      if (this.isMultiSelect) {
+        this.selectedValues = value ? value.split(',') : [];
+      }
+      this.render();
+    }
+  }
+
+  // ==========================================
+  // アプリケーションの状態管理
+  // ==========================================
+  let currentMonth = "";
+  let currentYear = new Date().getFullYear();
+  let appData = null;
+  let yearlyData = null;
+  let categoryChart = null;
+  let yearlyTrendChart = null;
+  let yearlyCategoryChart = null;
+
+  // 取引履歴フィルターの状態管理
+  let activeFilters = {
+    categories: [],
+    paidBy: []
+  };
+  let filterCategoryChips = null;
+  let filterPaidByChips = null;
+
+  // ==========================================
+  // セッションストレージキャッシュ＆暗号化管理
+  // ==========================================
+  let clientDbLastUpdated = null;
+  let isInitialLoad = true;
+
+  // ==========================================
+  // アプリケーションデバッグログ管理 (AppLogger)
+  // ==========================================
+  const AppLogger = {
+    logs: [],
+    isDebugMode: false,
+    isUiRendered: false,
+    
+    init() {
+      // 1. 同期判定：iframe の URL からパラメータを直接確認 (最速・フォールバック用)
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('debug') === 'true') {
+          console.log("[AppLogger] Sync parameter check: debug=true detected.");
+          this.enableDebugMode();
+          return;
+        }
+      } catch (e) {
+        console.warn("Failed to check iframe URL parameters: " + e.message);
+      }
+
+      // 2. 非同期判定：親ウィンドウ（親URL）のパラメータをGASの標準APIで確認
+      try {
+        if (typeof google !== "undefined" && google.script && google.script.url) {
+          const self = this;
+          google.script.url.getLocation(function(location) {
+            if (location.parameter.debug === "true" || location.parameter.debug === true) {
+              console.log("[AppLogger] Async parameter check: debug=true detected.");
+              self.enableDebugMode();
+            }
+          });
+        }
+      } catch (e) {
+        console.warn("Failed to check URL parameters for debug mode: " + e.message);
+      }
+    },
+    
+    enableDebugMode() {
+      this.isDebugMode = true;
+      console.log("[AppLogger] enableDebugMode called. isUiRendered=" + this.isUiRendered);
+      
+      const panel = document.getElementById("debug-console-panel");
+      if (panel) {
+        panel.style.display = "flex";
+        this.isUiRendered = true;
+        console.log("[AppLogger] Debug panel set to display: flex successfully.");
+        
+        // それまでに蓄積されていたログを遡ってUIにレンダリングする
+        const container = document.getElementById("debug-log-container");
+        if (container) {
+          container.innerHTML = "";
+          this.logs.forEach(entry => this.appendLogToUI(entry));
+          console.log(`[AppLogger] Rendered ${this.logs.length} buffered logs to UI.`);
+        } else {
+          console.warn("[AppLogger] debug-log-container element not found in DOM.");
+        }
+        lucide.createIcons();
+      } else {
+        console.warn("[AppLogger] debug-console-panel element not found in DOM yet. Retrying in 500ms...");
+        // DOM構築が未完了の場合に備えて、500ms後に再試行する
+        const self = this;
+        setTimeout(() => {
+          self.enableDebugMode();
+        }, 500);
+      }
+      
+      // 初回有効化ログを出力（二重表示を防ぐためにisUiRenderedが切り替わったときのみ）
+      if (this.isUiRendered && !this.logs.some(l => l.message === "デバッグモードが有効化されました。")) {
+        this.log("SYSTEM", "デバッグモードが有効化されました。");
+      }
+    },
+    
+    log(category, message, details = null) {
+      const logEntry = {
+        id: Math.random().toString(36).substring(2, 11),
+        timestamp: new Date(),
+        category: category.toUpperCase(), // API, DATABASE, UI, IMPORT, ERROR, SYSTEM
+        message: message,
+        details: details ? (typeof details === 'object' ? JSON.stringify(details) : String(details)) : null
+      };
+      
+      this.logs.push(logEntry);
+      
+      // デバッグモードの時のみブラウザ開発者ツールとUIパネルに出力する
+      if (this.isDebugMode) {
+        const colors = {
+          API: "color: #3399ff",
+          DATABASE: "color: #33cc66",
+          UI: "color: #ffaa66",
+          IMPORT: "color: #b366ff",
+          ERROR: "color: #ff6666; font-weight: bold;",
+          SYSTEM: "color: #e0e0e0; font-style: italic;"
+        };
+        console.log(`%c[${logEntry.category}] ${message}`, colors[logEntry.category] || "", details || "");
+        this.appendLogToUI(logEntry);
+      }
+    },
+    
+    appendLogToUI(entry) {
+      const container = document.getElementById("debug-log-container");
+      if (!container) return;
+      
+      const row = document.createElement("div");
+      row.className = `debug-row log-category-${entry.category.toLowerCase()}`;
+      row.setAttribute("data-category", entry.category);
+      
+      const timeStr = entry.timestamp.toTimeString().split(' ')[0] + '.' + String(entry.timestamp.getMilliseconds()).padStart(3, '0');
+      
+      let detailsHtml = "";
+      if (entry.details) {
+        detailsHtml = `<span class="debug-details" title="${escapeHtml(entry.details)}">(${escapeHtml(entry.details.substring(0, 100))}${entry.details.length > 100 ? '...' : ''})</span>`;
+      }
+      
+      row.innerHTML = `
+        <span class="debug-time">${timeStr}</span>
+        <span class="debug-badge debug-badge-${entry.category.toLowerCase()}">${entry.category}</span>
+        <span class="debug-msg">${escapeHtml(entry.message)}</span>
+        ${detailsHtml}
+      `;
+      
+      container.appendChild(row);
+      container.scrollTop = container.scrollHeight;
+      
+      const countBadge = document.getElementById("debug-log-count");
+      if (countBadge) {
+        countBadge.textContent = this.logs.length;
+      }
+    },
+    
+    getFormattedLogs() {
+      return this.logs.map(l => {
+        const timeStr = l.timestamp.toISOString();
+        return `[${timeStr}] [${l.category}] ${l.message}${l.details ? ' | Details: ' + l.details : ''}`;
+      }).join('\n');
+    }
+  };
+
+  // デバッグUI用ヘルパー関数
+  function filterDebugLogs() {
+    const filter = document.getElementById("debug-filter-category").value;
+    const container = document.getElementById("debug-log-container");
+    if (!container) return;
+    
+    const rows = container.querySelectorAll(".debug-row");
+    rows.forEach(row => {
+      const cat = row.getAttribute("data-category");
+      if (filter === "ALL" || cat === filter) {
+        row.style.display = "flex";
+      } else {
+        row.style.display = "none";
+      }
+    });
+    
+    const countBadge = document.getElementById("debug-log-count");
+    if (countBadge) {
+      if (filter === "ALL") {
+        countBadge.textContent = AppLogger.logs.length;
+      } else {
+        const visibleCount = container.querySelectorAll(`.debug-row[data-category="${filter}"]`).length;
+        countBadge.textContent = `${visibleCount}/${AppLogger.logs.length}`;
+      }
+    }
+  }
+
+  function toggleDebugConsole() {
+    const panel = document.getElementById("debug-console-panel");
+    const toggleIcon = document.getElementById("debug-toggle-icon");
+    if (!panel) return;
+    
+    const isCollapsed = panel.classList.toggle("collapsed");
+    if (toggleIcon) {
+      if (isCollapsed) {
+        toggleIcon.setAttribute("data-lucide", "chevrons-up");
+      } else {
+        toggleIcon.setAttribute("data-lucide", "chevrons-down");
+      }
+      lucide.createIcons();
+    }
+  }
+
+  function clearDebugLogs() {
+    AppLogger.logs = [];
+    const container = document.getElementById("debug-log-container");
+    if (container) container.innerHTML = "";
+    const countBadge = document.getElementById("debug-log-count");
+    if (countBadge) countBadge.textContent = "0";
+    AppLogger.log("SYSTEM", "ログがクリアされました。");
+  }
+
+  function copyDebugLogs() {
+    const text = AppLogger.getFormattedLogs();
+    navigator.clipboard.writeText(text).then(() => {
+      const copyIcon = document.getElementById("debug-copy-icon");
+      const copyBtn = document.getElementById("debug-copy-btn");
+      
+      if (copyBtn) copyBtn.setAttribute("title", "コピー完了！");
+      if (copyIcon) {
+        copyIcon.setAttribute("data-lucide", "check");
+        lucide.createIcons();
+      }
+      
+      setTimeout(() => {
+        if (copyBtn) copyBtn.setAttribute("title", "ログをコピー");
+        if (copyIcon) {
+          copyIcon.setAttribute("data-lucide", "copy");
+          lucide.createIcons();
+        }
+      }, 2000);
+    }).catch(err => {
+      alert("コピーに失敗しました: " + err.message);
+    });
+  }
+
+  window.filterDebugLogs = filterDebugLogs;
+  window.toggleDebugConsole = toggleDebugConsole;
+  window.clearDebugLogs = clearDebugLogs;
+  window.copyDebugLogs = copyDebugLogs;
+
+  const CACHE_STORAGE_KEY = "_hk_ledger_app_cache";
+  const FALLBACK_ENCRYPT_KEY = "hk_ledger_fallback_secure_key_2026";
+  let activePrefetchMonth = null; // 現在プリフェッチ実行中の月
+  let prefetchPendingMonth = null; // ユーザーが切り替え待ちしている月
+  let prefetchSuccessCallback = null; // 切り替え待ち月のロード完了時のコールバック
+
+  // Gemini API キーを取得する（暗号化用）
+  function getEncryptionKey() {
+    try {
+      const obfuscated = localStorage.getItem("_hk_session_data");
+      if (obfuscated) {
+        const reversed = obfuscated.split("").reverse().join("");
+        return atob(reversed);
+      }
+    } catch (e) {
+      console.warn("Failed to get API key for encryption: " + e.message);
+    }
+    return FALLBACK_ENCRYPT_KEY;
+  }
+
+  // CryptoJS を使用した暗号化
+  function encryptData(data) {
+    try {
+      const key = getEncryptionKey();
+      return CryptoJS.AES.encrypt(JSON.stringify(data), key).toString();
+    } catch (e) {
+      console.error("Encryption failed: " + e.message);
+      return null;
+    }
+  }
+
+  // CryptoJS を使用した復号
+  function decryptData(ciphertext) {
+    try {
+      const key = getEncryptionKey();
+      const bytes = CryptoJS.AES.decrypt(ciphertext, key);
+      const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+      if (!decryptedText) return null;
+      return JSON.parse(decryptedText);
+    } catch (e) {
+      console.warn("Decryption failed: " + e.message);
+      return null;
+    }
+  }
+
+  // セッションストレージからキャッシュを取得する
+  function getCacheFromStorage() {
+    try {
+      const encrypted = sessionStorage.getItem(CACHE_STORAGE_KEY);
+      if (encrypted) {
+        const decrypted = decryptData(encrypted);
+        if (decrypted) {
+          if (!decrypted.cache) decrypted.cache = {};
+          if (!decrypted.yearlyCache) decrypted.yearlyCache = {};
+          return decrypted;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to read cache from storage: " + e.message);
+    }
+    return { clientDbLastUpdated: null, cache: {}, yearlyCache: {} };
+  }
+
+  // セッションストレージにキャッシュを保存する
+  function saveCacheToStorage(cacheObj) {
+    try {
+      const encrypted = encryptData(cacheObj);
+      if (encrypted) {
+        sessionStorage.setItem(CACHE_STORAGE_KEY, encrypted);
+      }
+    } catch (e) {
+      console.warn("Failed to write cache to storage: " + e.message);
+    }
+  }
+
+  // タイムスタンプをデバッグ用に読みやすい時刻に変換する
+  function formatTimestamp(ts) {
+    if (!ts) return "なし";
+    const num = parseInt(ts);
+    if (isNaN(num)) return ts;
+    const d = new Date(num);
+    const timeStr = ("0" + d.getHours()).slice(-2) + ":" + 
+                    ("0" + d.getMinutes()).slice(-2) + ":" + 
+                    ("0" + d.getSeconds()).slice(-2) + "." + 
+                    ("00" + (num % 1000)).slice(-3);
+    return timeStr;
+  }
+
+  // 単一の月次データをキャッシュに登録する
+  function saveMonthDataToCache(monthStr, responseData) {
+    AppLogger.log("DATABASE", `${monthStr} のデータをローカルキャッシュに保存します。`, { timestamp: responseData.dbLastUpdated });
+    const cacheObj = getCacheFromStorage();
+    if (responseData.dbLastUpdated) {
+      clientDbLastUpdated = responseData.dbLastUpdated;
+      cacheObj.clientDbLastUpdated = responseData.dbLastUpdated;
+    }
+    cacheObj.cache[monthStr] = {
+      data: responseData,
+      timestamp: responseData.dbLastUpdated || clientDbLastUpdated
+    };
+    saveCacheToStorage(cacheObj);
+  }
+
+  // 単一の年間データをキャッシュに登録する
+  function saveYearlyDataToCache(yearStr, responseData) {
+    AppLogger.log("DATABASE", `${yearStr}年の年間データをローカルキャッシュに保存します。`, { timestamp: responseData.dbLastUpdated });
+    const cacheObj = getCacheFromStorage();
+    if (responseData.dbLastUpdated) {
+      clientDbLastUpdated = responseData.dbLastUpdated;
+      cacheObj.clientDbLastUpdated = responseData.dbLastUpdated;
+    }
+    cacheObj.yearlyCache[yearStr] = {
+      data: responseData,
+      timestamp: responseData.dbLastUpdated || clientDbLastUpdated
+    };
+    saveCacheToStorage(cacheObj);
+  }
+
+  // 全キャッシュの破棄
+  function clearAllCache() {
+    AppLogger.log("DATABASE", "すべてのローカルキャッシュを破棄（クリア）しました。");
+    sessionStorage.removeItem(CACHE_STORAGE_KEY);
+  }
+
+  // 同期アニメーションの開始
+  function startSyncAnimation(mode) {
+    const syncBtn = document.getElementById('sync-btn');
+    if (syncBtn) {
+      syncBtn.dataset.pendingStop = 'false';
+      syncBtn.classList.add(mode); // 'loading' または 'syncing'
+      if (mode === 'loading') {
+        syncBtn.disabled = true;
+      }
+    }
+  }
+
+  // 同期アニメーションの停止要求
+  function stopSyncAnimation() {
+    const syncBtn = document.getElementById('sync-btn');
+    if (syncBtn) {
+      // もしアニメーションが実行中でなければ、即座に状態をクリアする
+      if (!syncBtn.classList.contains('loading') && !syncBtn.classList.contains('syncing')) {
+        syncBtn.disabled = false;
+        syncBtn.dataset.pendingStop = 'false';
+        return;
+      }
+      // アニメーション実行中の場合は、フラグを立てて次の animationiteration で止まるようにする
+      syncBtn.dataset.pendingStop = 'true';
+    }
+  }
+
+  // 手動同期処理 (強制リフレッシュ)
+  function forceSync() {
+    startSyncAnimation('loading');
+    showTableLoading(true);
+    
+    // サーバー側のタイムスタンプを強制更新
+    google.script.run
+      .withSuccessHandler(function(newTimestamp) {
+        clientDbLastUpdated = newTimestamp;
+        clearAllCache(); // キャッシュを完全に破棄
+        
+        // 最新データを再取得
+        loadData();
+        
+        stopSyncAnimation();
+      })
+      .withFailureHandler(function(err) {
+        console.error("手動同期に失敗しました: ", err);
+        showTableLoading(false);
+        stopSyncAnimation();
+        alert("データの同期に失敗しました。");
+      })
+      .forceSyncDatabaseTimestamp();
+  }
+
+  // ==========================================
+  // テーマ管理ロジック
+  // ==========================================
+  let currentTheme = localStorage.getItem('theme') || 'system';
+
+  function getChartThemeColors() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                   (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    
+    return {
+      text: isDark ? '#eaeaea' : '#37352f',
+      grid: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(55, 53, 47, 0.05)',
+      cardBg: isDark ? '#202020' : '#ffffff',
+      emptyBg: isDark ? '#2b2b2b' : '#e0e0e0'
+    };
+  }
+
+  function applyTheme(theme) {
+    currentTheme = theme;
+    localStorage.setItem('theme', theme);
+    
+    const root = document.documentElement;
+    if (theme === 'system') {
+      root.removeAttribute('data-theme');
+    } else {
+      root.setAttribute('data-theme', theme);
+    }
+    
+    // アイコンの切替
+    const iconMap = {
+      system: 'monitor',
+      light: 'sun',
+      dark: 'moon'
+    };
+    const iconName = iconMap[theme] || 'monitor';
+    const themeIcon = document.getElementById('theme-icon');
+    if (themeIcon) {
+      themeIcon.setAttribute('data-lucide', iconName);
+      if (window.lucide) {
+        window.lucide.createIcons();
+      }
+    }
+    
+    // セレクトボックスの選択状態を同期
+    const themeSelect = document.getElementById('settings-theme');
+    if (themeSelect) {
+      themeSelect.value = theme;
+    }
+    
+    // グラフの再描画
+    if (appData) {
+      updateChart(appData.analysis.categoryTotals);
+    }
+    if (yearlyData) {
+      updateYearlyCharts(yearlyData);
+    }
+  }
+
+  function cycleTheme() {
+    const nextThemeMap = {
+      system: 'light',
+      light: 'dark',
+      dark: 'system'
+    };
+    const nextTheme = nextThemeMap[currentTheme] || 'system';
+    applyTheme(nextTheme);
+  }
+
+  // システムのテーマ変更検知
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (currentTheme === 'system') {
+      applyTheme('system');
+    }
+  });
+
+  // 選択チップのインスタンス変数
+  let selectCategory;
+  let selectPaidBy;
+  let selectSplitType;
+  let selectBeneficiaries;
+
+  // ==========================================
+  // 日付スライダーUIの制御ロジック
+  // ==========================================
+  
+  function formatDateISO(date) {
+    const y = date.getFullYear();
+    const m = ("0" + (date.getMonth() + 1)).slice(-2);
+    const d = ("0" + date.getDate()).slice(-2);
+    return `${y}-${m}-${d}`;
+  }
+
+  let oldestLoadedDate = new Date();
+  let calCurrentYear = new Date().getFullYear();
+  let calCurrentMonth = new Date().getMonth();
+  let settleCalCurrentYear = new Date().getFullYear();
+  let settleCalCurrentMonth = new Date().getMonth();
+
+  function generateDateSlider() {
+    const slider = document.getElementById("date-slider");
+    slider.innerHTML = "";
+    
+    // 今日から30日間をロード
+    oldestLoadedDate = new Date();
+    appendDatesToSlider(30);
+    
+    // スクリューイベント監視
+    slider.addEventListener("scroll", () => {
+      // 一番右端（過去）に近づいたらさらにロード
+      if (slider.scrollWidth - slider.scrollLeft - slider.clientWidth < 100) {
+        appendDatesToSlider(30);
+      }
+    });
+  }
+
+  function appendDatesToSlider(daysCount) {
+    const slider = document.getElementById("date-slider");
+    const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+    
+    for (let i = 0; i < daysCount; i++) {
+      const d = new Date(oldestLoadedDate);
+      if (slider.children.length > 0) {
+        d.setDate(d.getDate() - 1);
+      }
+      oldestLoadedDate = d;
+      
+      const dateStr = formatDateISO(d);
+      const month = d.getMonth() + 1;
+      const day = d.getDate();
+      const wday = d.getDay(); // 0:日, 6:土
+      
+      const card = document.createElement("div");
+      card.className = "date-card";
+      card.setAttribute("data-date", dateStr);
+      
+      let wdayClass = "";
+      if (wday === 6) wdayClass = "date-card-sat";
+      else if (wday === 0) wdayClass = "date-card-sun";
+      
+      card.innerHTML = `
+        <span class="date-card-month">${month}月</span>
+        <span class="date-card-day">${("0" + day).slice(-2)}</span>
+        <span class="date-card-weekday ${wdayClass}">${weekdays[wday]}</span>
+      `;
+      
+      card.addEventListener("click", () => {
+        document.getElementById("tx-date").value = dateStr;
+        selectDate(dateStr, false);
+      });
+      
+      slider.appendChild(card);
+    }
+  }
+
+  function selectDate(dateStr, triggerScroll = true) {
+    const str = String(dateStr);
+    const targetDate = new Date(str.replace(/-/g, "/"));
+    
+    // もし選択された日付が、現在読み込まれている最古の日付よりも過去の場合
+    // その日付が含まれるまで追加ロードする
+    if (targetDate < oldestLoadedDate) {
+      const diffTime = oldestLoadedDate - targetDate;
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 5;
+      appendDatesToSlider(diffDays);
+    }
+    
+    const today = new Date();
+    const todayZero = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const cards = document.querySelectorAll(".date-card");
+    let found = false;
+    
+    cards.forEach(card => {
+      const cardDateStr = card.getAttribute("data-date");
+      const cardDate = new Date(cardDateStr.replace(/-/g, "/"));
+      
+      // 選択されておらず、かつ今日より未来の日付カードは削除する
+      if (cardDate.getTime() > todayZero && cardDateStr !== dateStr) {
+        card.remove();
+        return;
+      }
+
+      if (cardDateStr === dateStr) {
+        card.classList.add("selected");
+        found = true;
+        
+        if (triggerScroll) {
+          card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+        }
+      } else {
+        card.classList.remove("selected");
+      }
+    });
+    
+    // スライダー内に見つからない場合（未来の日付など）は新しく作成して先頭に追加
+    if (!found) {
+      const slider = document.getElementById("date-slider");
+      const d = targetDate;
+      const month = d.getMonth() + 1;
+      const day = d.getDate();
+      const wday = d.getDay();
+      const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+      
+      const card = document.createElement("div");
+      card.className = "date-card selected";
+      card.setAttribute("data-date", dateStr);
+      
+      let wdayClass = "";
+      if (wday === 6) wdayClass = "date-card-sat";
+      else if (wday === 0) wdayClass = "date-card-sun";
+      
+      card.innerHTML = `
+        <span class="date-card-month">${month}月</span>
+        <span class="date-card-day">${("0" + day).slice(-2)}</span>
+        <span class="date-card-weekday ${wdayClass}">${weekdays[wday]}</span>
+      `;
+      
+      card.addEventListener("click", () => {
+        document.getElementById("tx-date").value = dateStr;
+        selectDate(dateStr, false);
+      });
+      
+      // 最初（今日）のカードの前に挿入（未来になるほど左に追加される形になる）
+      slider.insertBefore(card, slider.firstChild);
+      
+      if (triggerScroll) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      }
+    }
+  }
+
+  // オリジナルカレンダー描画関数
+  function renderCustomCalendar(year, month) {
+    const monthYearText = document.getElementById("calendar-month-year");
+    monthYearText.textContent = `${year}年${month + 1}月`;
+
+    const daysContainer = document.getElementById("calendar-days-container");
+    daysContainer.innerHTML = "";
+
+    const firstDayIndex = new Date(year, month, 1).getDay();
+    const totalDays = new Date(year, month + 1, 0).getDate();
+    const prevMonthTotalDays = new Date(year, month, 0).getDate();
+
+    const today = new Date();
+    const todayStr = formatDateISO(today);
+    const todayZero = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const selectedDateStr = document.getElementById("tx-date").value;
+
+    // 未来の月へのめくり制限を解除
+    const nextMonthBtn = document.getElementById("cal-next-month");
+    nextMonthBtn.disabled = false;
+    nextMonthBtn.style.opacity = "1";
+    nextMonthBtn.style.pointerEvents = "auto";
+
+    // 1. 前月の日付セルを追加
+    for (let i = firstDayIndex - 1; i >= 0; i--) {
+      const prevDay = prevMonthTotalDays - i;
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell other-month";
+      cell.textContent = prevDay;
+      
+      const targetYear = month === 0 ? year - 1 : year;
+      const targetMonth = month === 0 ? 11 : month - 1;
+      const targetD = new Date(targetYear, targetMonth, prevDay).getTime();
+      const dateStr = formatDateISO(new Date(targetYear, targetMonth, prevDay));
+      
+      if (targetD > todayZero) {
+        cell.classList.add("future-date");
+      }
+      cell.addEventListener("click", () => {
+        setCustomCalendarDate(dateStr);
+      });
+      
+      daysContainer.appendChild(cell);
+    }
+
+    // 2. 当月の日付セルを追加
+    for (let day = 1; day <= totalDays; day++) {
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell";
+      cell.textContent = day;
+
+      const currentD = new Date(year, month, day);
+      const currentDTime = currentD.getTime();
+      const dateStr = formatDateISO(currentD);
+      const wday = currentD.getDay();
+
+      if (wday === 6) cell.classList.add("sat");
+      else if (wday === 0) cell.classList.add("sun");
+
+      if (dateStr === todayStr) {
+        cell.classList.add("today");
+      }
+
+      if (dateStr === selectedDateStr) {
+        cell.classList.add("selected");
+      }
+
+      if (currentDTime > todayZero) {
+        cell.classList.add("future-date");
+      }
+      cell.addEventListener("click", () => {
+        setCustomCalendarDate(dateStr);
+      });
+
+      daysContainer.appendChild(cell);
+    }
+
+    // 3. 翌月の日付セルを追加
+    const totalCellsUsed = firstDayIndex + totalDays;
+    const remainingCells = 42 - totalCellsUsed;
+    for (let day = 1; day <= remainingCells; day++) {
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell other-month";
+      cell.textContent = day;
+
+      const targetYear = month === 11 ? year + 1 : year;
+      const targetMonth = month === 11 ? 0 : month + 1;
+      const targetD = new Date(targetYear, targetMonth, day).getTime();
+      const dateStr = formatDateISO(new Date(targetYear, targetMonth, day));
+
+      if (targetD > todayZero) {
+        cell.classList.add("future-date");
+      }
+      
+      // 未来の日付でもクリック可能にする
+      cell.addEventListener("click", () => {
+        setCustomCalendarDate(dateStr);
+      });
+
+      daysContainer.appendChild(cell);
+    }
+  }
+
+  function setCustomCalendarDate(dateStr) {
+    document.getElementById("tx-date").value = dateStr;
+    selectDate(dateStr, true);
+    document.getElementById("custom-calendar-popup").classList.remove("active");
+  }
+
+  // 精算記録モーダル用オリジナルカレンダー描画
+  function renderSettleCalendar(year, month) {
+    const monthYearText = document.getElementById("settle-calendar-month-year");
+    if (!monthYearText) return;
+    monthYearText.textContent = `${year}年${month + 1}月`;
+
+    const daysContainer = document.getElementById("settle-calendar-days-container");
+    if (!daysContainer) return;
+    daysContainer.innerHTML = "";
+
+    const firstDayIndex = new Date(year, month, 1).getDay();
+    const totalDays = new Date(year, month + 1, 0).getDate();
+    const prevMonthTotalDays = new Date(year, month, 0).getDate();
+
+    const today = new Date();
+    const todayStr = formatDateISO(today);
+    const todayZero = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const selectedDateStr = document.getElementById("settle-date-input").value;
+
+    const nextMonthBtn = document.getElementById("settle-cal-next-month");
+    if (nextMonthBtn) {
+      nextMonthBtn.disabled = false;
+      nextMonthBtn.style.opacity = "1";
+      nextMonthBtn.style.pointerEvents = "auto";
+    }
+
+    // 1. 前月の日付セルを追加
+    for (let i = firstDayIndex - 1; i >= 0; i--) {
+      const prevDay = prevMonthTotalDays - i;
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell other-month";
+      cell.textContent = prevDay;
+      
+      const targetYear = month === 0 ? year - 1 : year;
+      const targetMonth = month === 0 ? 11 : month - 1;
+      const targetD = new Date(targetYear, targetMonth, prevDay).getTime();
+      const dateStr = formatDateISO(new Date(targetYear, targetMonth, prevDay));
+      
+      if (targetD > todayZero) {
+        cell.classList.add("future-date");
+      }
+      cell.addEventListener("click", () => {
+        setSettleCalendarDate(dateStr);
+      });
+      
+      daysContainer.appendChild(cell);
+    }
+
+    // 2. 当月の日付セルを追加
+    for (let day = 1; day <= totalDays; day++) {
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell";
+      cell.textContent = day;
+
+      const currentD = new Date(year, month, day);
+      const currentDTime = currentD.getTime();
+      const dateStr = formatDateISO(currentD);
+      const wday = currentD.getDay();
+
+      if (wday === 6) cell.classList.add("sat");
+      else if (wday === 0) cell.classList.add("sun");
+
+      if (dateStr === todayStr) {
+        cell.classList.add("today");
+      }
+
+      if (dateStr === selectedDateStr) {
+        cell.classList.add("selected");
+      }
+
+      if (currentDTime > todayZero) {
+        cell.classList.add("future-date");
+      }
+      cell.addEventListener("click", () => {
+        setSettleCalendarDate(dateStr);
+      });
+
+      daysContainer.appendChild(cell);
+    }
+
+    // 3. 翌月の日付セルを追加
+    const totalCellsUsed = firstDayIndex + totalDays;
+    const remainingCells = 42 - totalCellsUsed;
+    for (let day = 1; day <= remainingCells; day++) {
+      const cell = document.createElement("div");
+      cell.className = "calendar-day-cell other-month";
+      cell.textContent = day;
+
+      const targetYear = month === 11 ? year + 1 : year;
+      const targetMonth = month === 11 ? 0 : month + 1;
+      const targetD = new Date(targetYear, targetMonth, day).getTime();
+      const dateStr = formatDateISO(new Date(targetYear, targetMonth, day));
+
+      if (targetD > todayZero) {
+        cell.classList.add("future-date");
+      }
+      
+      cell.addEventListener("click", () => {
+        setSettleCalendarDate(dateStr);
+      });
+
+      daysContainer.appendChild(cell);
+    }
+  }
+
+  function setSettleCalendarDate(dateStr) {
+    document.getElementById("settle-date-input").value = dateStr;
+    const displayInput = document.getElementById("settle-date-display-input");
+    if (displayInput) {
+      displayInput.value = dateStr ? dateStr.replace(/-/g, "/") : "";
+    }
+    const popup = document.getElementById("settle-calendar-popup");
+    if (popup) {
+      popup.classList.remove("active");
+    }
+  }
+
+  // 初期化処理
+  window.addEventListener('DOMContentLoaded', () => {
+    // デバッグログ初期化
+    AppLogger.init();
+
+    // テーマの初期適用
+    applyTheme(currentTheme);
+    
+    // アイコンの初期化
+    lucide.createIcons();
+    
+    // 同期ボタンのアニメーション制御用のイベントリスナー設定
+    const syncBtn = document.getElementById('sync-btn');
+    if (syncBtn) {
+      syncBtn.addEventListener('animationiteration', () => {
+        if (syncBtn.dataset.pendingStop === 'true') {
+          syncBtn.classList.remove('syncing');
+          syncBtn.classList.remove('loading');
+          syncBtn.disabled = false;
+          syncBtn.dataset.pendingStop = 'false';
+        }
+      });
+    }
+    
+    // 日付スライダーの生成
+    generateDateSlider();
+    
+    // フィルターChoiceChipsの初期化
+    filterCategoryChips = new ChoiceChips("filter-category-container", "filter-category-hidden", true);
+    filterPaidByChips = new ChoiceChips("filter-paid-by-container", "filter-paid-by-hidden", true);
+    
+    // 選択チップの初期化
+    selectCategory = new ChoiceChips("tx-category-container", "tx-category", false);
+    
+    selectPaidBy = new ChoiceChips("tx-paid-by-container", "tx-paid-by", false, (val) => {
+      onPayerChange(val);
+    });
+    
+    selectSplitType = new ChoiceChips("tx-split-type-container", "tx-split-type", false, (val) => {
+      onSplitTypeChange(val);
+    });
+    
+    // 負担メンバーは「複数選択」を有効化
+    selectBeneficiaries = new ChoiceChips("tx-beneficiaries-container", "tx-beneficiaries", true);
+    
+    // 初期日付の設定（今日）
+    const today = new Date();
+    const todayStr = formatDateISO(today);
+    document.getElementById("tx-date").value = todayStr;
+    selectDate(todayStr, false); // スクロールなしで今日を選択
+
+    // 現在の月 (YYYY-MM) をデフォルト値として設定
+    const year = today.getFullYear();
+    const month = ("0" + (today.getMonth() + 1)).slice(-2);
+    currentMonth = `${year}-${month}`;
+    
+    const monthInput = document.getElementById("month-input");
+    monthInput.value = currentMonth;
+
+    // ==========================================
+    // カスタム月選択UIの初期化
+    // ==========================================
+    let mpSelectedYear = today.getFullYear();
+    const monthPickerTrigger = document.getElementById("month-picker-trigger");
+    const monthPickerPopup = document.getElementById("month-picker-popup");
+    const mpPrevYearBtn = document.getElementById("mp-prev-year");
+    const mpNextYearBtn = document.getElementById("mp-next-year");
+    const mpCurrentYearText = document.getElementById("mp-current-year");
+    const mpGrid = document.getElementById("month-picker-grid");
+    const mpTodayBtn = document.getElementById("mp-today-btn");
+    const monthPickerDisplay = document.getElementById("month-picker-display");
+
+    // 年月表示の同期更新関数（グローバルに公開して adjustMonth からも呼べるようにする）
+    window.updateMonthPickerDisplay = function() {
+      const parts = currentMonth.split("-");
+      if (parts.length === 2) {
+        monthPickerDisplay.textContent = `${parts[0]}年${parts[1]}月`;
+      }
+    };
+    window.updateMonthPickerDisplay();
+
+    // 月グリッド描画
+    function renderMonthPickerGrid(year) {
+      mpCurrentYearText.textContent = `${year}年`;
+      mpGrid.innerHTML = "";
+
+      const parts = currentMonth.split("-");
+      const currentSelectedYear = parseInt(parts[0]);
+      const currentSelectedMonth = parseInt(parts[1]);
+
+      for (let m = 1; m <= 12; m++) {
+        const cell = document.createElement("div");
+        cell.className = "month-picker-cell";
+        cell.textContent = `${m}月`;
+
+        if (year === currentSelectedYear && m === currentSelectedMonth) {
+          cell.classList.add("selected");
+        }
+
+        cell.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const targetMonthStr = ("0" + m).slice(-2);
+          currentMonth = `${year}-${targetMonthStr}`;
+          monthInput.value = currentMonth;
+          window.updateMonthPickerDisplay();
+          monthPickerPopup.classList.remove("active");
+          
+          cancelEdit();
+          loadData();
+        });
+
+        mpGrid.appendChild(cell);
+      }
+    }
+
+    // トリガークリックで開閉
+    monthPickerTrigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const active = monthPickerPopup.classList.toggle("active");
+      if (active) {
+        const parts = currentMonth.split("-");
+        mpSelectedYear = parseInt(parts[0]);
+        renderMonthPickerGrid(mpSelectedYear);
+      }
+    });
+
+    // 年の切り替え
+    mpPrevYearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      mpSelectedYear--;
+      renderMonthPickerGrid(mpSelectedYear);
+    });
+
+    mpNextYearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      mpSelectedYear++;
+      renderMonthPickerGrid(mpSelectedYear);
+    });
+
+    // 「今月」ボタン
+    mpTodayBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = ("0" + (now.getMonth() + 1)).slice(-2);
+      currentMonth = `${y}-${m}`;
+      monthInput.value = currentMonth;
+      window.updateMonthPickerDisplay();
+      monthPickerPopup.classList.remove("active");
+      
+      cancelEdit();
+      loadData();
+    });
+
+    // ポップアップ自体のクリック伝播を防止
+    monthPickerPopup.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+
+    // 外側クリックで閉じる
+    document.addEventListener("click", () => {
+      monthPickerPopup.classList.remove("active");
+    });
+    
+    // 日付インプットとスライダーのバインド
+    const txDateInput = document.getElementById("tx-date");
+    txDateInput.addEventListener("change", (e) => {
+      selectDate(e.target.value, true);
+    });
+
+    // オリジナルカレンダーのイベント設定
+    const calTrigger = document.getElementById("custom-calendar-trigger");
+    const calPopup = document.getElementById("custom-calendar-popup");
+    const prevMonthBtn = document.getElementById("cal-prev-month");
+    const nextMonthBtn = document.getElementById("cal-next-month");
+
+    calTrigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const active = calPopup.classList.toggle("active");
+      if (active) {
+        const curDateStr = txDateInput.value;
+        if (curDateStr) {
+          const d = new Date(curDateStr.replace(/-/g, "/"));
+          if (!isNaN(d.getTime())) {
+            calCurrentYear = d.getFullYear();
+            calCurrentMonth = d.getMonth();
+          } else {
+            const today = new Date();
+            calCurrentYear = today.getFullYear();
+            calCurrentMonth = today.getMonth();
+          }
+        } else {
+          const today = new Date();
+          calCurrentYear = today.getFullYear();
+          calCurrentMonth = today.getMonth();
+        }
+        renderCustomCalendar(calCurrentYear, calCurrentMonth);
+      }
+    });
+
+    prevMonthBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      calCurrentMonth--;
+      if (calCurrentMonth < 0) {
+        calCurrentMonth = 11;
+        calCurrentYear--;
+      }
+      renderCustomCalendar(calCurrentYear, calCurrentMonth);
+    });
+
+    nextMonthBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      calCurrentMonth++;
+      if (calCurrentMonth > 11) {
+        calCurrentMonth = 0;
+        calCurrentYear++;
+      }
+      renderCustomCalendar(calCurrentYear, calCurrentMonth);
+    });
+
+    calPopup.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+
+    document.addEventListener("click", () => {
+      calPopup.classList.remove("active");
+      if (settleCalPopup) settleCalPopup.classList.remove("active");
+    });
+
+    // 精算記録モーダルのオリジナルカレンダーイベント設定
+    const settleCalTrigger = document.getElementById("settle-date-display-input");
+    const settleCalPopup = document.getElementById("settle-calendar-popup");
+    const settlePrevMonthBtn = document.getElementById("settle-cal-prev-month");
+    const settleNextMonthBtn = document.getElementById("settle-cal-next-month");
+
+    if (settleCalTrigger && settleCalPopup) {
+      settleCalTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const active = settleCalPopup.classList.toggle("active");
+        if (active) {
+          const curDateStr = document.getElementById("settle-date-input").value;
+          if (curDateStr) {
+            const d = new Date(curDateStr.replace(/-/g, "/"));
+            if (!isNaN(d.getTime())) {
+              settleCalCurrentYear = d.getFullYear();
+              settleCalCurrentMonth = d.getMonth();
+            } else {
+              const today = new Date();
+              settleCalCurrentYear = today.getFullYear();
+              settleCalCurrentMonth = today.getMonth();
+            }
+          } else {
+            const today = new Date();
+            settleCalCurrentYear = today.getFullYear();
+            settleCalCurrentMonth = today.getMonth();
+          }
+          renderSettleCalendar(settleCalCurrentYear, settleCalCurrentMonth);
+        }
+      });
+    }
+
+    if (settlePrevMonthBtn) {
+      settlePrevMonthBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        settleCalCurrentMonth--;
+        if (settleCalCurrentMonth < 0) {
+          settleCalCurrentMonth = 11;
+          settleCalCurrentYear--;
+        }
+        renderSettleCalendar(settleCalCurrentYear, settleCalCurrentMonth);
+      });
+    }
+
+    if (settleNextMonthBtn) {
+      settleNextMonthBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        settleCalCurrentMonth++;
+        if (settleCalCurrentMonth > 11) {
+          settleCalCurrentMonth = 0;
+          settleCalCurrentYear++;
+        }
+        renderSettleCalendar(settleCalCurrentYear, settleCalCurrentMonth);
+      });
+    }
+
+    if (settleCalPopup) {
+      settleCalPopup.addEventListener("click", (e) => {
+        e.stopPropagation();
+      });
+    }
+
+    // ==========================================
+    // 電卓機能の初期化
+    // ==========================================
+    const calcTrigger = document.getElementById("calculator-trigger");
+    const calcPopup = document.getElementById("calculator-popup");
+    const calcExprEl = document.getElementById("calc-expression");
+    const calcResultEl = document.getElementById("calc-result");
+    const calcCloseBtn = document.getElementById("calc-close-btn");
+    const calcApplyBtn = document.getElementById("calc-apply-btn");
+    const txAmount = document.getElementById("tx-amount");
+
+    let calcExpressionStr = "";
+
+    // 数式入力の直接評価（フォーカスアウト時）
+    txAmount.addEventListener("blur", () => {
+      const val = txAmount.value.trim();
+      if (val) {
+        let normalized = val.replace(/＋/g, '+').replace(/ー/g, '-').replace(/＊/g, '*').replace(/／/g, '/');
+        const evaluated = evaluateMathExpression(normalized);
+        if (evaluated !== null) {
+          txAmount.value = evaluated;
+        }
+      }
+    });
+
+    // 電卓起動
+    calcTrigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const active = calcPopup.classList.toggle("active");
+      if (active) {
+        const curVal = txAmount.value.trim();
+        if (curVal && !isNaN(evaluateMathExpression(curVal))) {
+          calcExpressionStr = curVal;
+        } else {
+          calcExpressionStr = "";
+        }
+        updateCalcDisplay();
+      }
+    });
+
+    // 電卓内のクリックイベント
+    calcPopup.querySelectorAll(".calc-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const val = btn.getAttribute("data-val");
+        
+        if (val === "C") {
+          calcExpressionStr = "";
+        } else if (val === "back") {
+          calcExpressionStr = calcExpressionStr.slice(0, -1);
+        } else if (val === "tax8" || val === "tax10") {
+          if (calcExpressionStr) {
+            const taxMultiplier = val === "tax8" ? "1.08" : "1.1";
+            if (/^\d+(\.\d+)?$/.test(calcExpressionStr)) {
+              calcExpressionStr = `${calcExpressionStr} * ${taxMultiplier}`;
+            } else {
+              calcExpressionStr = `(${calcExpressionStr}) * ${taxMultiplier}`;
+            }
+          }
+        } else if (val === "=") {
+          const evaluated = evaluateMathExpression(calcExpressionStr);
+          if (evaluated !== null) {
+            calcExpressionStr = evaluated.toString();
+          }
+        } else {
+          calcExpressionStr += val;
+        }
+        updateCalcDisplay();
+      });
+    });
+
+    calcCloseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      calcPopup.classList.remove("active");
+    });
+
+    calcApplyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const evaluated = evaluateMathExpression(calcExpressionStr);
+      if (evaluated !== null) {
+        txAmount.value = evaluated;
+      } else if (calcExpressionStr) {
+        txAmount.value = calcExpressionStr;
+      }
+      calcPopup.classList.remove("active");
+    });
+
+    calcPopup.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+
+    // ドキュメントクリックで閉じる
+    document.addEventListener("click", () => {
+      calcPopup.classList.remove("active");
+    });
+
+    function updateCalcDisplay() {
+      calcExprEl.textContent = calcExpressionStr.replace(/\*/g, "×").replace(/\//g, "÷");
+      const evaluated = evaluateMathExpression(calcExpressionStr);
+      calcResultEl.textContent = evaluated !== null ? evaluated.toLocaleString() : "0";
+    }
+    
+    // データの読み込み
+    loadData();
+  });
+
+  /**
+   * 月移動ボタン処理
+   */
+  function adjustMonth(diff) {
+    const monthInput = document.getElementById("month-input");
+    const date = new Date((currentMonth + "-01").replace(/-/g, "/"));
+    date.setMonth(date.getMonth() + diff);
+    
+    const year = date.getFullYear();
+    const month = ("0" + (date.getMonth() + 1)).slice(-2);
+    currentMonth = `${year}-${month}`;
+    monthInput.value = currentMonth;
+    
+    // 表示の更新
+    if (typeof window.updateMonthPickerDisplay === "function") {
+      window.updateMonthPickerDisplay();
+    }
+    
+    // 編集モードを抜ける
+    cancelEdit();
+    
+    loadData();
+  }
+
+  function loadData() {
+    AppLogger.log("UI", `${currentMonth} のデータ取得を開始します。`);
+    
+    // ローカルキャッシュのメタデータを取得して clientDbLastUpdated を同期
+    const cacheObj = getCacheFromStorage();
+    if (cacheObj.clientDbLastUpdated) {
+      clientDbLastUpdated = cacheObj.clientDbLastUpdated;
+    }
+
+    let bypassCache = false;
+    let isFromCacheApplied = false;
+
+    if (isInitialLoad) {
+      isInitialLoad = false;
+      const serverTs = typeof window.initialDbLastUpdated !== "undefined" ? window.initialDbLastUpdated : null;
+      
+      if (serverTs && clientDbLastUpdated && serverTs === clientDbLastUpdated) {
+        AppLogger.log("DATABASE", `初回ロード: ローカルの最終更新スタンプ（${clientDbLastUpdated}）がサーバー（${serverTs}）と一致するため、キャッシュを適用します。`);
+      } else {
+        bypassCache = true;
+        AppLogger.log("DATABASE", `初回ロード: サーバーの最新スタンプ（${serverTs}）がローカル（${clientDbLastUpdated}）と異なるため、キャッシュをバイパスして最新データを取得します。`);
+      }
+    }
+
+    if (!bypassCache) {
+      const cachedEntry = cacheObj.cache[currentMonth];
+
+      if (cachedEntry && cachedEntry.timestamp === clientDbLastUpdated) {
+        AppLogger.log("DATABASE", `${currentMonth} の有効なキャッシュが見つかりました。キャッシュからロードします。`, { timestamp: clientDbLastUpdated });
+        onDataLoaded(cachedEntry.data, true);
+        isFromCacheApplied = true;
+      } else if (cachedEntry) {
+        AppLogger.log("DATABASE", `${currentMonth} のキャッシュは存在しますが、タイムスタンプが古い、または不一致です。`, { cacheTs: cachedEntry.timestamp, clientDbLastUpdated });
+      }
+    }
+
+    // 表示月のバックグラウンド・スタンプチェック (SWR: Stale-While-Revalidate)
+    // キャッシュから仮表示した際、他デバイス等での更新がないかサーバーの最新タイムスタンプをバックグラウンド確認する
+    if (isFromCacheApplied) {
+      AppLogger.log("DATABASE", `月切り替え: キャッシュを仮表示しました。バックグラウンドで最新タイムスタンプを確認します...`);
+      const checkedMonth = currentMonth;
+      
+      startSyncAnimation('syncing');
+      
+      google.script.run
+        .withSuccessHandler(function(serverTs) {
+          stopSyncAnimation();
+          if (checkedMonth !== currentMonth) {
+            AppLogger.log("SYSTEM", `タイムスタンプ確認中に表示月が ${checkedMonth} から ${currentMonth} に変更されたため、結果を破棄します。`);
+            return;
+          }
+          if (serverTs && clientDbLastUpdated && serverTs !== clientDbLastUpdated) {
+            AppLogger.log("DATABASE", `タイムスタンプ差異検知: サーバーの最新スタンプ（${serverTs}）とローカル（${clientDbLastUpdated}）に差異があります。キャッシュを廃棄してデータを再取得します。`);
+            // 全キャッシュの破棄
+            clearAllCache();
+            // サーバーから再取得
+            fetchDataFromServerDirectly();
+          } else {
+            AppLogger.log("DATABASE", `タイムスタンプ確認完了: サーバーとの差異はありませんでした。キャッシュは最新です。`);
+          }
+        })
+        .withFailureHandler(function(err) {
+          stopSyncAnimation();
+          console.warn("Failed to check timestamp from background: " + err.message);
+        })
+        .getLatestTimestamp();
+        
+      return; // キャッシュ適用済みのため同期処理はここで一旦終了
+    }
+
+    // キャッシュがない、またはバイパスされた場合は、通常通りサーバーからデータを取得する
+    fetchDataFromServerDirectly();
+  }
+
+  function fetchDataFromServerDirectly() {
+    if (activePrefetchMonth === currentMonth) {
+      AppLogger.log("API", `${currentMonth} は現在プリフェッチ中のため、通信の完了を待機します。`);
+      showTableLoading(true);
+      document.getElementById("settlement-loading").style.display = "flex";
+      document.getElementById("settlement-results").style.display = "none";
+      
+      prefetchPendingMonth = currentMonth;
+      prefetchSuccessCallback = function(data) {
+        AppLogger.log("API", `${currentMonth} のプリフェッチ待機が完了し、データを適用します。`);
+        onDataLoaded(data);
+      };
+      return;
+    }
+    
+    prefetchPendingMonth = null;
+    prefetchSuccessCallback = null;
+
+    showTableLoading(true);
+    document.getElementById("settlement-loading").style.display = "flex";
+    document.getElementById("settlement-results").style.display = "none";
+    
+    AppLogger.log("API", `サーバーから ${currentMonth} のデータを取得中...`);
+    google.script.run
+      .withSuccessHandler(function(response) {
+        AppLogger.log("API", `サーバーから ${currentMonth} のデータを正常に取得しました。`);
+        onDataLoaded(response);
+      })
+      .withFailureHandler(function(err) {
+        AppLogger.log("ERROR", `${currentMonth} のデータ取得に失敗しました。`, err);
+        onDataLoadFailed(err);
+      })
+      .getAppData(currentMonth);
+  }
+
+  // 優先順位付き直列プリフェッチチェーン (Offsets: [-1, 1, -2, 2, -3, 3])
+  function prefetchMonths(baseMonthStr) {
+    const offsets = [ -1, 1, -2, 2, -3, 3 ];
+    let idx = 0;
+    
+    AppLogger.log("API", `${baseMonthStr} を起点とする周辺月（${offsets.join(', ')} ヶ月）のプリフェッチ処理を開始します。`);
+
+    function next() {
+      if (baseMonthStr !== currentMonth) {
+        AppLogger.log("SYSTEM", `表示月が変更されたため、${baseMonthStr} を起点とするプリフェッチを中断します。`);
+        return; // 中断
+      }
+      if (idx >= offsets.length) {
+        activePrefetchMonth = null;
+        AppLogger.log("SYSTEM", "周辺月のプリフェッチ処理がすべて完了しました。");
+        return;
+      }
+
+      const offset = offsets[idx];
+      idx++;
+
+      const date = new Date((baseMonthStr + "-01").replace(/-/g, "/"));
+      date.setMonth(date.getMonth() + offset);
+      const y = date.getFullYear();
+      const m = ("0" + (date.getMonth() + 1)).slice(-2);
+      const targetMonth = `${y}-${m}`;
+
+      const cacheObj = getCacheFromStorage();
+      const cached = cacheObj.cache[targetMonth];
+      if (cached && cached.timestamp === clientDbLastUpdated) {
+        AppLogger.log("DATABASE", `${targetMonth} はすでに最新キャッシュが存在するため、プリフェッチをスキップします。`);
+        next();
+        return;
+      }
+
+      activePrefetchMonth = targetMonth;
+      AppLogger.log("API", `${targetMonth} のプリフェッチ（バックグラウンド取得）を開始します...`);
+
+      google.script.run
+        .withSuccessHandler(function(response) {
+          if (response && response.success) {
+            AppLogger.log("API", `${targetMonth} のプリフェッチに成功しました。キャッシュに保存します。`);
+            saveMonthDataToCache(targetMonth, response);
+            if (prefetchPendingMonth === targetMonth && prefetchSuccessCallback) {
+              AppLogger.log("API", `${targetMonth} は現在表示要求中のため、待機中のコールバックを実行して即時描画します。`);
+              const cb = prefetchSuccessCallback;
+              prefetchPendingMonth = null;
+              prefetchSuccessCallback = null;
+              cb(response);
+            }
+          } else {
+            AppLogger.log("ERROR", `${targetMonth} のプリフェッチレスポンスが異常です。`, response);
+          }
+          next();
+        })
+        .withFailureHandler(function(err) {
+          AppLogger.log("ERROR", `${targetMonth} のプリフェッチ通信に失敗しました。`, err);
+          next();
+        })
+        .getAppData(targetMonth);
+    }
+
+    next();
+  }
+
+  /**
+   * データ取得成功時の処理
+   */
+  function onDataLoaded(response, isFromCache = false) {
+    AppLogger.log("UI", `${(response && response.month) || currentMonth} のデータを画面に描画します。ソース: ${isFromCache ? 'キャッシュ' : 'サーバー'}`);
+    showTableLoading(false);
+    document.getElementById("settlement-loading").style.display = "none";
+    
+    if (!response) {
+      alert("データの取得に失敗しました（サーバーからの応答がありません）。\n権限の再承認が必要な可能性があります。画面を再読み込みするか、本番公開URLに再度アクセスしてみてください。");
+      return;
+    }
+    
+    if (!response.success) {
+      alert("エラーが発生しました:\n" + response.message);
+      return;
+    }
+    
+    appData = response;
+
+    if (!isFromCache) {
+      saveMonthDataToCache(response.month, response);
+    }
+    
+    // 各選択チップのオプション設定
+    populateDropdowns(response.masters);
+    
+    // スタッツカードの表示更新
+    updateStatsCards(response);
+    
+    // 精算結果の表示更新
+    updateSettlements(response.analysis.settlementInstructions, response.analysis.userBalances);
+    
+    // 清算ステータスの表示更新
+    updateSettlementStatusDisplay(response.settlementRecords, response.analysis);
+    
+    // カテゴリグラフの更新
+    updateChart(response.analysis.categoryTotals);
+    
+    // 明細履歴テーブルの更新
+    updateHistoryTable(filterTransactions(response.transactions));
+    
+    // アイコンの再適用
+    lucide.createIcons();
+    
+    // 周辺月データの事前取得を開始
+    prefetchMonths(currentMonth);
+
+    // 表示月の「年」の年間データをプリフェッチする
+    prefetchYearOfCurrentMonth();
+  }
+
+  /**
+   * データ取得失敗時
+   */
+  function onDataLoadFailed(error) {
+    showTableLoading(false);
+    document.getElementById("settlement-loading").style.display = "none";
+    alert("データの読み込みに失敗しました。スプレッドシートのIDと権限を確認してください。\nエラー: " + error.message);
+  }
+
+  /**
+   * 選択チップのオプション動的生成
+   */
+  function populateDropdowns(masters) {
+    // カテゴリ
+    const currentCat = selectCategory.getValue();
+    selectCategory.setOptions(masters.categories);
+    if (masters.categories.includes(currentCat)) {
+      selectCategory.setValue(currentCat);
+    }
+
+    // 支払い者
+    const currentPayer = selectPaidBy.getValue();
+    selectPaidBy.setOptions(masters.users);
+    if (masters.users.includes(currentPayer)) {
+      selectPaidBy.setValue(currentPayer);
+    }
+
+    // 精算・立替タイプ
+    const currentSplit = selectSplitType.getValue();
+    selectSplitType.setOptions(masters.split_types);
+    if (currentSplit && masters.split_types.includes(currentSplit)) {
+      selectSplitType.setValue(currentSplit);
+    } else {
+      selectSplitType.setValue("割り勘"); // デフォルト値
+    }
+
+    // 負担するメンバー (マルチセレクト)
+    const currentBeneficiaries = selectBeneficiaries.getValue();
+    selectBeneficiaries.setOptions(masters.users);
+    if (currentBeneficiaries) {
+      selectBeneficiaries.setValue(currentBeneficiaries);
+    } else {
+      // 初期状態では全員を選択
+      selectBeneficiaries.setValue(masters.users.join(','));
+    }
+
+    // フィルター用ChoiceChipsの更新
+    if (filterCategoryChips) {
+      filterCategoryChips.setOptions(masters.categories);
+    }
+    if (filterPaidByChips) {
+      filterPaidByChips.setOptions(masters.users);
+    }
+
+    // 現在の activeFilters がマスタに存在するものだけに絞り込む
+    if (activeFilters.categories.length > 0 && masters.categories) {
+      activeFilters.categories = activeFilters.categories.filter(c => masters.categories.includes(c));
+    }
+    if (activeFilters.paidBy.length > 0 && masters.users) {
+      activeFilters.paidBy = activeFilters.paidBy.filter(p => masters.users.includes(p));
+    }
+
+    // アクティブなフィルターバッジを描画
+    renderActiveFilters();
+    
+    // 支払い方法 (精算記録モーダル用)
+    const settleMethodInput = document.getElementById("settle-method-input");
+    if (settleMethodInput && masters.payment_methods) {
+      const currentVal = settleMethodInput.value;
+      settleMethodInput.innerHTML = '<option value="">選択してください</option>';
+      masters.payment_methods.forEach(function(pm) {
+        const opt = document.createElement("option");
+        opt.value = pm;
+        opt.textContent = pm;
+        settleMethodInput.appendChild(opt);
+      });
+      settleMethodInput.value = currentVal;
+    }
+    
+    // 一括設定用の精算タイプ (レシート一括モーダル用)
+    const bulkSplitTypeSelect = document.getElementById("bulk-split-type");
+    if (bulkSplitTypeSelect && masters.split_types) {
+      const currentVal = bulkSplitTypeSelect.value;
+      bulkSplitTypeSelect.innerHTML = '<option value="">（選択してください）</option>';
+      masters.split_types.forEach(function(st) {
+        let emoji = "";
+        if (st === "割り勘") emoji = "👥 ";
+        else if (st === "立て替え") emoji = "🙋‍♂️ ";
+        else if (st === "個別") emoji = "👤 ";
+        
+        const opt = document.createElement("option");
+        opt.value = st;
+        opt.textContent = emoji + st;
+        bulkSplitTypeSelect.appendChild(opt);
+      });
+      bulkSplitTypeSelect.value = currentVal;
+    }
+
+    // ステータス (精算記録モーダル用)
+    const settleStatusInput = document.getElementById("settle-status-input");
+    if (settleStatusInput && masters.settlement_statuses) {
+      const currentVal = settleStatusInput.value;
+      settleStatusInput.innerHTML = "";
+      masters.settlement_statuses.forEach(function(ss) {
+        const opt = document.createElement("option");
+        opt.value = ss;
+        opt.textContent = ss;
+        settleStatusInput.appendChild(opt);
+      });
+      settleStatusInput.value = currentVal || (masters.settlement_statuses.length > 0 ? masters.settlement_statuses[0] : "未払い");
+    }
+
+    // 支払いパターン (精算記録モーダル用)
+    const settlePatternInput = document.getElementById("settle-pattern-input");
+    if (settlePatternInput && masters.payment_patterns) {
+      const currentVal = settlePatternInput.value;
+      settlePatternInput.innerHTML = '<option value="">選択してください</option>';
+      masters.payment_patterns.forEach(function(pp) {
+        const opt = document.createElement("option");
+        opt.value = pp;
+        opt.textContent = pp;
+        settlePatternInput.appendChild(opt);
+      });
+      settlePatternInput.value = currentVal;
+    }
+    
+    // UI制御の同期
+    onSplitTypeChange(selectSplitType.getValue());
+  }
+
+  /**
+   * 精算タイプ変更時のインタラクティブなUI制御
+   */
+  function onSplitTypeChange(splitType) {
+    const benGroup = document.getElementById("beneficiaries-group");
+    const benLabel = document.getElementById("beneficiaries-label");
+    const payer = selectPaidBy.getValue();
+    const allUsers = appData ? appData.masters.users : [];
+    
+    if (splitType === "個別") {
+      // 個別の場合は負担メンバー選択を非表示にし、負担者を支払い者本人のみに設定
+      benGroup.style.display = "none";
+      if (payer) {
+        selectBeneficiaries.setValue(payer);
+      }
+    } else {
+      benGroup.style.display = "block";
+      
+      if (splitType === "割り勘") {
+        benLabel.textContent = "負担するメンバー（複数選択可）";
+        // 新規登録の初期化時は全員を選択
+        if (!document.getElementById("tx-id").value && selectBeneficiaries.getValue() === "") {
+          selectBeneficiaries.setValue(allUsers.join(','));
+        }
+      } else if (splitType === "立て替え") {
+        benLabel.textContent = "立て替えた相手（複数選択可）";
+        // 新規登録の初期化時は支払者以外を選択
+        if (!document.getElementById("tx-id").value && payer) {
+          const others = allUsers.filter(u => u !== payer);
+          selectBeneficiaries.setValue(others.join(','));
+        }
+      }
+    }
+  }
+
+  /**
+   * 支払い者変更時の自動プレセレクト制御
+   */
+  function onPayerChange(payer) {
+    const splitType = selectSplitType.getValue();
+    const allUsers = appData ? appData.masters.users : [];
+    
+    if (splitType === "個別") {
+      // 個別の場合は負担者を支払い者に強制変更
+      selectBeneficiaries.setValue(payer);
+    } else if (splitType === "立て替え") {
+      // 立て替えの場合、支払い者自身を負担対象から自動で除外する
+      const currentBen = selectBeneficiaries.getValue().split(',').filter(u => u !== "");
+      const newBen = currentBen.filter(u => u !== payer);
+      
+      if (newBen.length === 0) {
+        // もし誰も選択されていなければ、支払者以外全員をセット
+        const fallback = allUsers.filter(u => u !== payer);
+        selectBeneficiaries.setValue(fallback.join(','));
+      } else {
+        selectBeneficiaries.setValue(newBen.join(','));
+      }
+    }
+  }
+
+  /**
+   * クイック統計カードの更新
+   */
+  function updateStatsCards(data) {
+    const total = data.analysis.totalExpense;
+    document.getElementById("stat-total").textContent = `¥${total.toLocaleString()}`;
+    
+    const userCount = data.masters.users.length;
+    document.getElementById("stat-users-count").textContent = `${userCount} 人`;
+  }
+
+  /**
+   * 精算指示＆個人別バランスの表示更新
+   */
+  function updateSettlements(instructions, balances) {
+    const resultsContainer = document.getElementById("settlement-results");
+    resultsContainer.innerHTML = "";
+    resultsContainer.style.display = "flex";
+    
+    let balanceHtml = '<div style="margin-bottom: 8px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 8px; width: 100%;">';
+    balances.forEach(b => {
+      const balanceSign = b.balance > 0 ? "+" : "";
+      const balanceColor = b.balance > 0 ? "#51cf66" : (b.balance < 0 ? "#ff6b6b" : "inherit");
+      
+      balanceHtml += `
+        <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px; color:var(--text-secondary);">
+          <span>${b.user} (支出: ¥${b.used.toLocaleString()} / 支払: ¥${b.paid.toLocaleString()})</span>
+          <span style="color: ${balanceColor}; font-weight:600;">${balanceSign}¥${b.balance.toLocaleString()}</span>
+        </div>
+      `;
+    });
+    balanceHtml += '</div>';
+    resultsContainer.innerHTML = balanceHtml;
+
+    if (instructions.length === 0) {
+      resultsContainer.innerHTML += `
+        <div class="settlement-empty">
+          <i data-lucide="smile" style="width:20px; height:20px; display:block; margin:0 auto 8px; color:var(--accent-green);"></i>
+          今月の精算は不要です。全員が均等に負担しています。
+        </div>
+      `;
+      lucide.createIcons();
+      return;
+    }
+    
+    instructions.forEach(ins => {
+      const item = document.createElement("div");
+      item.className = "settlement-item";
+      item.style.width = "100%";
+      item.innerHTML = `
+        <div class="settlement-parties">
+          <span class="settlement-user-pill debtor">${ins.from}</span>
+          <span class="settlement-direction-arrow"><i data-lucide="arrow-right" style="width:14px; height:14px;"></i></span>
+          <span class="settlement-user-pill creditor">${ins.to}</span>
+        </div>
+        <div class="settlement-amount">¥${ins.amount.toLocaleString()}</div>
+      `;
+      resultsContainer.appendChild(item);
+    });
+    
+    lucide.createIcons();
+  }
+
+  /**
+   * カテゴリグラフの更新
+   */
+  function updateChart(categoryTotals) {
+    const ctx = document.getElementById('categoryChart').getContext('2d');
+    const categories = Object.keys(categoryTotals);
+    const data = Object.values(categoryTotals);
+    
+    const colors = [
+      '#2eaadc', '#ae3ec9', '#37b24d', '#f76707', '#f03e3e', '#f59f00', '#748ffc', '#10b981', '#94a3b8'
+    ];
+    
+    if (categoryChart) {
+      categoryChart.destroy();
+    }
+    
+    const themeColors = getChartThemeColors();
+    
+    if (categories.length === 0 || data.reduce((a, b) => a + b, 0) === 0) {
+      categoryChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['データなし'],
+          datasets: [{
+            data: [1],
+            backgroundColor: [themeColors.emptyBg],
+            borderWidth: 1,
+            borderColor: themeColors.cardBg
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false }
+          },
+          cutout: '75%'
+        }
+      });
+      return;
+    }
+    
+    categoryChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: categories,
+        datasets: [{
+          data: data,
+          backgroundColor: colors.slice(0, categories.length),
+          borderWidth: 1,
+          borderColor: themeColors.cardBg,
+          hoverOffset: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: window.innerWidth < 600 ? 'bottom' : 'right',
+            labels: {
+              boxWidth: 12,
+              color: themeColors.text,
+              font: { size: 10, family: 'Inter' }
+            }
+          },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const val = context.raw || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const pct = Math.round((val / total) * 100);
+                return `${context.label}: ¥${val.toLocaleString()} (${pct}%)`;
+              }
+            }
+          }
+        },
+        cutout: '70%'
+      }
+    });
+  }
+
+  /**
+   * 明細履歴テーブルの更新
+   */
+  function updateHistoryTable(transactions) {
+    const tbody = document.getElementById("history-tbody");
+    const noHistoryMsg = document.getElementById("no-history-msg");
+    tbody.innerHTML = "";
+    
+    if (transactions.length === 0) {
+      noHistoryMsg.style.display = "block";
+      return;
+    }
+    noHistoryMsg.style.display = "none";
+    
+    const allUsers = appData ? appData.masters.users : [];
+    
+    transactions.forEach(tx => {
+      const tr = document.createElement("tr");
+      
+      // 1. 精算タイプのバッジ化
+      const splitType = tx.split_type || "割り勘";
+      let splitTypeBadge = "";
+      if (splitType === "割り勘") {
+        splitTypeBadge = `<span class="badge badge-split">👥 割り勘</span>`;
+      } else if (splitType === "立て替え") {
+        splitTypeBadge = `<span class="badge badge-fronting">🙋‍♂️ 立て替え</span>`;
+      } else if (splitType === "個別") {
+        splitTypeBadge = `<span class="badge badge-individual">👤 個別</span>`;
+      }
+      
+      // 2. 負担メンバー一覧の整形表示
+      const beneficiaries = tx.beneficiaries ? tx.beneficiaries.split(',') : [];
+      let beneficiariesBadge = "";
+      if (splitType === "個別") {
+        beneficiariesBadge = `<span class="badge badge-individual">${tx.paid_by}（自己負担）</span>`;
+      } else if (beneficiaries.length === 0 || beneficiaries.length === allUsers.length) {
+        beneficiariesBadge = `<span class="badge badge-split">全員</span>`;
+      } else {
+        const listText = beneficiaries.join(', ');
+        beneficiariesBadge = `<span class="badge badge-fronting" title="${listText}">${beneficiaries.length}名 (${listText})</span>`;
+      }
+      
+      let titleContent = `
+        <div style="font-weight: 500;">${escapeHtml(tx.title)}</div>
+        ${tx.memo ? `<div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px;">${escapeHtml(tx.memo)}</div>` : ''}
+      `;
+
+      tr.innerHTML = `
+        <td>${titleContent}</td>
+        <td style="color: var(--text-secondary); font-size: 0.8rem;">${formatJapaneseDate(tx.date)}</td>
+        <td><span class="badge badge-category">${tx.category}</span></td>
+        <td><span class="badge badge-user">${tx.paid_by}</span></td>
+        <td class="text-right amount-val">¥${Number(tx.amount).toLocaleString()}</td>
+        <td>${splitTypeBadge}</td>
+        <td>${beneficiariesBadge}</td>
+        <td class="action-col" style="min-width: 80px;">
+          <div style="display: flex; gap: 4px; justify-content: flex-end;">
+            <button class="icon-btn" onclick="startEditTransaction('${tx.id}')" title="編集">
+              <i data-lucide="edit-3" style="width: 14px; height: 14px; color: var(--text-secondary);"></i>
+            </button>
+            <button class="icon-btn btn-danger-hover" onclick="deleteTransaction('${tx.id}', '${escapeJsStr(tx.title)}')" title="削除">
+              <i data-lucide="trash-2" style="width: 14px; height: 14px; color: var(--accent-red);"></i>
+            </button>
+          </div>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+    lucide.createIcons();
+  }
+
+  /**
+   * 編集モードの開始
+   */
+  function startEditTransaction(id) {
+    if (!appData) return;
+    const tx = appData.transactions.find(t => t.id === id);
+    if (!tx) return;
+    
+    // フォームに値を格納
+    document.getElementById("tx-id").value = tx.id;
+    document.getElementById("tx-date").value = tx.date;
+    document.getElementById("tx-title").value = tx.title;
+    document.getElementById("tx-amount").value = tx.amount;
+    document.getElementById("tx-memo").value = tx.memo || "";
+    
+    // 日付スライダーの選択状態を同期
+    selectDate(tx.date, true);
+    
+    // 各選択チップに値をセット
+    selectCategory.setValue(tx.category);
+    selectPaidBy.setValue(tx.paid_by);
+    selectSplitType.setValue(tx.split_type || "割り勘");
+    
+    // 負担メンバーを復元
+    selectBeneficiaries.setValue(tx.beneficiaries || "");
+    
+    // UIを「編集モード」に変更
+    document.getElementById("submit-btn-text").textContent = "更新する";
+    document.getElementById("cancel-btn").style.display = "inline-flex";
+    document.querySelector(".form-panel h2").innerHTML = '<i data-lucide="edit-3"></i> 取引を編集';
+    
+    // フォームコントロールの表示/非表示を強制同期
+    onSplitTypeChange(tx.split_type || "割り勘");
+    
+    lucide.createIcons();
+    
+    // フォームまでスクロール
+    document.querySelector(".form-panel").scrollIntoView({ behavior: 'smooth' });
+  }
+
+  /**
+   * 編集モードのキャンセル
+   */
+  function cancelEdit() {
+    document.getElementById("tx-id").value = "";
+    document.getElementById("tx-title").value = "";
+    document.getElementById("tx-amount").value = "";
+    document.getElementById("tx-memo").value = "";
+    
+    // 日付を今日にリセット
+    const todayStr = formatDateISO(new Date());
+    document.getElementById("tx-date").value = todayStr;
+    selectDate(todayStr, false);
+    
+    // チップをクリア
+    selectCategory.setValue("");
+    selectPaidBy.setValue("");
+    selectSplitType.setValue("割り勘");
+    
+    // デフォルトで全員選択に戻す
+    const allUsers = appData ? appData.masters.users : [];
+    selectBeneficiaries.setValue(allUsers.join(','));
+    
+    document.getElementById("submit-btn-text").textContent = "登録する";
+    document.getElementById("cancel-btn").style.display = "none";
+    document.querySelector(".form-panel h2").innerHTML = '<i data-lucide="plus-circle"></i> 取引を記録';
+    
+    onSplitTypeChange("割り勘");
+    lucide.createIcons();
+  }
+
+  /**
+   * テーブルローディングの切り替え
+   */
+  function showTableLoading(show) {
+    const tbody = document.getElementById("history-tbody");
+    if (show) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="8" style="text-align: center; padding: 40px;">
+            <div class="spinner" style="margin: 0 auto 12px;"></div>
+            データを読み込み中...
+          </td>
+        </tr>
+      `;
+    }
+  }
+
+  /**
+   * 取引データ削除処理
+   */
+  function deleteTransaction(id, name) {
+    if (!confirm(`「${name}」の取引データを削除してよろしいですか？`)) {
+      return;
+    }
+    
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res.success) {
+          if (document.getElementById("tx-id").value === id) {
+            cancelEdit();
+          }
+          clearAllCache();
+          loadData();
+        } else {
+          alert("削除に失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(err => {
+        alert("削除処理中にエラーが発生しました: " + err.message);
+      })
+      .deleteTransaction(id);
+  }
+
+  /**
+   * 取引データ登録・更新送信処理
+   */
+  function submitTransaction(e) {
+    e.preventDefault();
+    
+    const txId = document.getElementById("tx-id").value;
+    const category = selectCategory.getValue();
+    const paidBy = selectPaidBy.getValue();
+    const splitType = selectSplitType.getValue();
+    const beneficiaries = selectBeneficiaries.getValue();
+    
+    // バリデーション
+    if (!category) {
+      alert("カテゴリを選択してください。");
+      return;
+    }
+    if (!paidBy) {
+      alert("支払い者を選択してください。");
+      return;
+    }
+    if (!splitType) {
+      alert("精算・立替タイプを選択してください。");
+      return;
+    }
+    if (splitType !== "個別" && !beneficiaries) {
+      alert("負担するメンバーを少なくとも1名選択してください。");
+      return;
+    }
+
+    // 金額入力値の検証と数式評価
+    const amountInput = document.getElementById("tx-amount");
+    let amountVal = amountInput.value.trim();
+    // 全角の＋ー＊／などを半角に変換
+    amountVal = amountVal.replace(/＋/g, '+').replace(/ー/g, '-').replace(/＊/g, '*').replace(/／/g, '/');
+    const evaluatedAmount = evaluateMathExpression(amountVal);
+    if (evaluatedAmount !== null) {
+      amountInput.value = evaluatedAmount;
+    } else {
+      const num = Number(amountVal);
+      if (isNaN(num) || num <= 0) {
+        alert("金額は有効な数値または数式を入力してください。");
+        return;
+      }
+    }
+    
+    const tx = {
+      id: txId,
+      date: document.getElementById("tx-date").value,
+      title: document.getElementById("tx-title").value,
+      amount: document.getElementById("tx-amount").value,
+      category: category,
+      paid_by: paidBy,
+      split_type: splitType,
+      beneficiaries: splitType === "個別" ? paidBy : beneficiaries,
+      memo: document.getElementById("tx-memo").value
+    };
+    
+    // ローディング表示
+    const submitBtn = document.getElementById("submit-btn");
+    const originalText = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<div class="spinner" style="width:14px; height:14px; border-width:2px; display:inline-block; margin-right:6px;"></div> 保存中...';
+    
+    if (txId) {
+      google.script.run
+        .withSuccessHandler(res => {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalText;
+          
+          if (res.success) {
+            cancelEdit();
+            clearAllCache();
+            loadData();
+          } else {
+            alert("更新に失敗しました: " + res.message);
+          }
+        })
+        .withFailureHandler(err => {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalText;
+          alert("更新処理中にエラーが発生しました: " + err.message);
+        })
+        .updateTransaction(tx);
+    } else {
+      google.script.run
+        .withSuccessHandler(res => {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalText;
+          
+          if (res.success) {
+            document.getElementById("tx-title").value = "";
+            document.getElementById("tx-amount").value = "";
+            document.getElementById("tx-memo").value = "";
+            
+            // 選択状態のリセット
+            selectCategory.setValue("");
+            cancelEdit();
+            clearAllCache();
+            loadData();
+          } else {
+            alert("登録に失敗しました: " + res.message);
+          }
+        })
+        .withFailureHandler(err => {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalText;
+          alert("登録処理中にエラーが発生しました: " + err.message);
+        })
+        .addTransaction(tx);
+    }
+  }
+
+  // ==========================================
+  // レシートOCR処理 (予備用)
+  // ==========================================
+  
+  function handleReceiptUpload(e) {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    
+    if (files.length === 1) {
+      // === 1枚の場合: 従来通りフォームに自動入力 ===
+      openModal('ocr-loading-modal');
+      document.getElementById('ocr-loading-title').textContent = 'Geminiでレシートを解析中...';
+      document.getElementById('ocr-loading-desc').innerHTML = '画像から店名、日付、金額、カテゴリを読み取っています。<br>数秒ほどお待ちください。';
+      
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const dataUrl = evt.target.result;
+        const parts = dataUrl.split(",");
+        const mimeType = parts[0].match(/:(.*?);/)[1];
+        const base64Data = parts[1];
+        
+        let clientKey = "";
+        try {
+          const stored = localStorage.getItem("_hk_session_data");
+          if (stored) clientKey = atob(stored);
+        } catch(e) {}
+        
+        google.script.run
+          .withSuccessHandler(onReceiptAnalyzed)
+          .withFailureHandler(onReceiptAnalysisFailed)
+          .analyzeReceipt(base64Data, mimeType, clientKey);
+      };
+      reader.readAsDataURL(files[0]);
+    } else {
+      // === 複数枚の場合: 一括解析 → プレビュー → 一括登録 ===
+      openModal('ocr-loading-modal');
+      document.getElementById('ocr-loading-title').textContent = files.length + '枚のレシートを解析中...';
+      document.getElementById('ocr-loading-desc').innerHTML = '複数のレシートを1回のAPIコールで解析しています。<br>枚数が多いほど時間がかかります。';
+      
+      // 全ファイルをbase64に変換してからサーバーに送信
+      const imagePromises = [];
+      for (let i = 0; i < files.length; i++) {
+        imagePromises.push(readFileAsBase64(files[i]));
+      }
+      
+      Promise.all(imagePromises).then(function(images) {
+        let clientKey = "";
+        try {
+          const stored = localStorage.getItem("_hk_session_data");
+          if (stored) clientKey = atob(stored);
+        } catch(e) {}
+        
+        google.script.run
+          .withSuccessHandler(onBatchReceiptsAnalyzed)
+          .withFailureHandler(onReceiptAnalysisFailed)
+          .analyzeReceipts(images, clientKey);
+      }).catch(function(err) {
+        closeModal('ocr-loading-modal');
+        alert("画像の読み込みに失敗しました: " + err.message);
+      });
+    }
+    
+    e.target.value = ""; // リセット
+  }
+  
+  /**
+   * ファイルをbase64に変換する（Promise版）
+   */
+  function readFileAsBase64(file) {
+    return new Promise(function(resolve, reject) {
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const dataUrl = evt.target.result;
+        const parts = dataUrl.split(",");
+        const mimeType = parts[0].match(/:(.*?);/)[1];
+        const base64Data = parts[1];
+        resolve({ base64Data: base64Data, mimeType: mimeType });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  
+  /**
+   * 1枚のレシート解析完了時（従来と同じ）
+   */
+  function onReceiptAnalyzed(response) {
+    closeModal('ocr-loading-modal');
+    
+    if (!response.success) {
+      alert("レシートの解析に失敗しました:\n" + response.message);
+      return;
+    }
+    
+    // 複数データが含まれている場合は一括登録プレビューを開く
+    if (response.data && response.data.length > 1) {
+      onBatchReceiptsAnalyzed(response);
+      return;
+    }
+    
+    // 単一データの場合
+    const data = Array.isArray(response.data) ? response.data[0] : response.data;
+    if (!data) return;
+    
+    const dateInput = document.getElementById("tx-date");
+    const titleInput = document.getElementById("tx-title");
+    const amountInput = document.getElementById("tx-amount");
+    
+    if (data.date) {
+      dateInput.value = data.date;
+      selectDate(data.date, true);
+    }
+    if (data.title) titleInput.value = data.title;
+    if (data.amount) amountInput.value = data.amount;
+    
+    if (data.category) {
+      selectCategory.setValue(data.category);
+    }
+    
+    const dateSliderWrapper = document.querySelector(".date-slider-wrapper");
+    const autofilled = [dateSliderWrapper, titleInput, amountInput, document.getElementById("tx-category-container")];
+    autofilled.forEach(el => {
+      if (el) {
+        el.style.backgroundColor = "rgba(46, 170, 220, 0.15)";
+        el.style.transition = "background-color 1s ease";
+        setTimeout(() => {
+          el.style.backgroundColor = "";
+        }, 1500);
+      }
+    });
+  }
+  
+  /**
+   * 複数レシート一括解析完了時
+   */
+  /**
+   * 複数レシート一括解析完了時
+   */
+  let parsedReceiptBatch = [];
+  
+  function onBatchReceiptsAnalyzed(response) {
+    closeModal('ocr-loading-modal');
+    
+    if (!response.success) {
+      alert("レシートの一括解析に失敗しました:\n" + response.message);
+      return;
+    }
+    
+    parsedReceiptBatch = response.data;
+    
+    // 一括設定用のユーザーリストを初期化
+    const bulkPaidBySelect = document.getElementById("bulk-paid-by");
+    bulkPaidBySelect.innerHTML = '<option value="">（選択してください）</option>';
+    const users = appData ? appData.masters.users : [];
+    users.forEach(function(u) {
+      const opt = document.createElement("option");
+      opt.value = u;
+      opt.textContent = u;
+      bulkPaidBySelect.appendChild(opt);
+    });
+    document.getElementById("bulk-split-type").value = "";
+    
+    // 一括設定用の負担メンバーチェックボックスを初期化
+    const bulkBenContainer = document.getElementById("bulk-beneficiaries-container");
+    bulkBenContainer.innerHTML = "";
+    users.forEach(function(u) {
+      const lbl = document.createElement("label");
+      lbl.style.cssText = "display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; cursor: pointer; color: var(--text-main); margin-right: 8px;";
+      lbl.innerHTML = `
+        <input type="checkbox" class="bulk-beneficiary-chk" value="${escapeHtml(u)}" checked style="cursor: pointer;" onchange="applyBulkSetting('beneficiaries')">
+        ${escapeHtml(u)}
+      `;
+      bulkBenContainer.appendChild(lbl);
+    });
+    
+    // プレビューテーブルを構築
+    const tbody = document.getElementById("receipt-batch-tbody");
+    tbody.innerHTML = "";
+    
+    const categories = appData ? appData.masters.categories : [];
+    const defaultPayer = selectPaidBy.getValue() || (users.length > 0 ? users[0] : "");
+    
+    parsedReceiptBatch.forEach(function(item, idx) {
+      const tr = document.createElement("tr");
+      
+      // カテゴリ選択肢HTML
+      let catOptionsHtml = "";
+      categories.forEach(function(c) {
+        const selected = c === item.category ? "selected" : "";
+        catOptionsHtml += `<option value="${escapeHtml(c)}" ${selected}>${escapeHtml(c)}</option>`;
+      });
+      
+      // 支払い者選択肢HTML
+      let payerOptionsHtml = "";
+      users.forEach(function(u) {
+        const selected = u === defaultPayer ? "selected" : "";
+        payerOptionsHtml += `<option value="${escapeHtml(u)}" ${selected}>${escapeHtml(u)}</option>`;
+      });
+      
+      // 精算タイプ選択肢HTML
+      let splitTypeOptionsHtml = "";
+      const splitTypes = appData ? appData.masters.split_types : ["割り勘", "立て替え", "個別"];
+      splitTypes.forEach(function(st) {
+        let emoji = "";
+        if (st === "割り勘") emoji = "👥 ";
+        else if (st === "立て替え") emoji = "🙋‍♂️ ";
+        else if (st === "個別") emoji = "👤 ";
+        
+        const selected = st === "割り勘" ? "selected" : "";
+        splitTypeOptionsHtml += `<option value="${escapeHtml(st)}" ${selected}>${emoji}${escapeHtml(st)}</option>`;
+      });
+      
+      // 負担メンバーのチェックボックスHTML
+      let beneficiariesHtml = `<div class="batch-beneficiaries-container" style="display: flex; gap: 4px; flex-wrap: wrap;">`;
+      users.forEach(function(u) {
+        beneficiariesHtml += `
+          <label style="display: inline-flex; align-items: center; gap: 2px; font-size: 0.75rem; cursor: pointer; background: var(--bg-input); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-color); color: var(--text-main);">
+            <input type="checkbox" class="batch-beneficiary-chk" value="${escapeHtml(u)}" checked style="cursor: pointer;">
+            ${escapeHtml(u)}
+          </label>
+        `;
+      });
+      beneficiariesHtml += `</div>`;
+      
+      tr.innerHTML = `
+        <td>
+          <input type="text" class="batch-title" value="${escapeHtml(item.title)}" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem;">
+        </td>
+        <td>
+          <input type="date" class="batch-date" value="${item.date}" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem;">
+        </td>
+        <td>
+          <select class="batch-category" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; cursor: pointer;">
+            ${catOptionsHtml}
+          </select>
+        </td>
+        <td>
+          <input type="number" class="batch-amount" value="${item.amount}" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; text-align: right;">
+        </td>
+        <td>
+          <select class="batch-paid-by" onchange="syncRowBeneficiaries(this)" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; cursor: pointer;">
+            ${payerOptionsHtml}
+          </select>
+        </td>
+        <td>
+          <select class="batch-split-type" onchange="syncRowBeneficiaries(this)" style="width: 100%; padding: 4px 6px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-main); font-size: 0.8rem; cursor: pointer;">
+            ${splitTypeOptionsHtml}
+          </select>
+        </td>
+        <td>
+          ${beneficiariesHtml}
+        </td>
+        <td>
+          <button type="button" class="icon-btn btn-danger-hover" onclick="removeBatchRow(this)" style="display: flex; align-items: center; justify-content: center; margin: 0 auto; color: var(--accent-red); background: none; border: none; cursor: pointer;" title="除外">
+            <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+      // 初期化時にも同期を実行（個別や立て替えの初期チェック状態・無効化を反映）
+      syncRowBeneficiaries(tr.querySelector(".batch-paid-by"));
+    });
+    
+    document.getElementById("receipt-batch-count").textContent = parsedReceiptBatch.length;
+    openModal("receipt-batch-modal");
+    lucide.createIcons();
+  }
+  
+  /**
+   * 一括設定の適用
+   */
+  function applyBulkSetting(type) {
+    if (type === "paid-by") {
+      const val = document.getElementById("bulk-paid-by").value;
+      if (!val) return;
+      const selects = document.querySelectorAll("#receipt-batch-tbody .batch-paid-by");
+      selects.forEach(function(s) {
+        s.value = val;
+        syncRowBeneficiaries(s); // 支払い者変更に追従して負担メンバーチェックボックスも同期
+      });
+    } else if (type === "split-type") {
+      const val = document.getElementById("bulk-split-type").value;
+      if (!val) return;
+      const selects = document.querySelectorAll("#receipt-batch-tbody .batch-split-type");
+      selects.forEach(function(s) {
+        s.value = val;
+        syncRowBeneficiaries(s); // 精算タイプ変更に追従して負担メンバーチェックボックスも同期
+      });
+    } else if (type === "beneficiaries") {
+      // 一括設定のチェックボックスの状態を取得
+      const bulkChks = document.querySelectorAll("#bulk-beneficiaries-container .bulk-beneficiary-chk");
+      const stateMap = {};
+      bulkChks.forEach(function(c) {
+        stateMap[c.value] = c.checked;
+      });
+      // すべての行に適用（個別や立て替えの制約を考慮しつつ適用）
+      const rows = document.querySelectorAll("#receipt-batch-tbody tr");
+      rows.forEach(function(tr) {
+        const splitSelect = tr.querySelector(".batch-split-type");
+        const payerSelect = tr.querySelector(".batch-paid-by");
+        const splitType = splitSelect ? splitSelect.value : "";
+        const payer = payerSelect ? payerSelect.value : "";
+        
+        const rowChks = tr.querySelectorAll(".batch-beneficiary-chk");
+        rowChks.forEach(function(c) {
+          if (stateMap.hasOwnProperty(c.value)) {
+            if (splitType === "個別") {
+              c.checked = (c.value === payer);
+              c.disabled = true;
+              c.parentElement.style.opacity = (c.value === payer) ? "1" : "0.5";
+            } else if (splitType === "立て替え" && c.value === payer) {
+              c.checked = false;
+              c.disabled = false;
+              c.parentElement.style.opacity = "1";
+            } else {
+              c.checked = stateMap[c.value];
+              c.disabled = false;
+              c.parentElement.style.opacity = "1";
+            }
+          }
+        });
+      });
+    }
+  }
+  
+  /**
+   * 行内の「負担メンバー」チェックボックスの状態を精算タイプ・支払い者と同期する
+   */
+  function syncRowBeneficiaries(element) {
+    const tr = element.closest("tr");
+    if (!tr) return;
+    const payerSelect = tr.querySelector(".batch-paid-by");
+    const splitSelect = tr.querySelector(".batch-split-type");
+    if (!payerSelect || !splitSelect) return;
+    
+    const payer = payerSelect.value;
+    const splitType = splitSelect.value;
+    const chks = tr.querySelectorAll(".batch-beneficiary-chk");
+    
+    chks.forEach(function(chk) {
+      const u = chk.value;
+      if (splitType === "個別") {
+        chk.checked = (u === payer);
+        chk.disabled = true;
+        chk.parentElement.style.opacity = (u === payer) ? "1" : "0.5";
+      } else if (splitType === "立て替え") {
+        chk.checked = (u !== payer);
+        chk.disabled = false;
+        chk.parentElement.style.opacity = "1";
+      } else { // "割り勘"
+        chk.checked = true;
+        chk.disabled = false;
+        chk.parentElement.style.opacity = "1";
+      }
+    });
+  }
+  
+  /**
+   * 行の削除
+   */
+  function removeBatchRow(btn) {
+    const tr = btn.closest("tr");
+    if (tr) {
+      tr.remove();
+      const count = document.querySelectorAll("#receipt-batch-tbody tr").length;
+      document.getElementById("receipt-batch-count").textContent = count;
+    }
+  }
+  
+  /**
+   * レシート一括登録の確定
+   */
+  function confirmReceiptBatchImport() {
+    const tbody = document.getElementById("receipt-batch-tbody");
+    const rows = tbody.querySelectorAll("tr");
+    if (rows.length === 0) {
+      alert("登録するレシートデータがありません。");
+      return;
+    }
+    
+    const btn = document.getElementById("receipt-batch-import-btn");
+    btn.disabled = true;
+    btn.textContent = "登録中...";
+    
+    const txList = [];
+    let hasError = false;
+    
+    rows.forEach(function(row) {
+      const title = row.querySelector(".batch-title").value.trim();
+      const date = row.querySelector(".batch-date").value;
+      const category = row.querySelector(".batch-category").value;
+      const amount = Number(row.querySelector(".batch-amount").value) || 0;
+      const paidBy = row.querySelector(".batch-paid-by").value;
+      const splitType = row.querySelector(".batch-split-type").value;
+      
+      // 選択されている負担メンバーを取得してカンマ区切りにする
+      const checkedBens = Array.from(row.querySelectorAll(".batch-beneficiary-chk:checked")).map(function(chk) {
+        return chk.value;
+      });
+      const beneficiaries = checkedBens.join(",");
+      
+      if (!title || !date || !paidBy || !splitType) {
+        hasError = true;
+      }
+      
+      txList.push({
+        date: date,
+        title: title,
+        category: category,
+        amount: amount,
+        paid_by: paidBy,
+        split_type: splitType,
+        beneficiaries: beneficiaries,
+        memo: "レシート一括読込"
+      });
+    });
+    
+    if (hasError) {
+      alert("入力されていない項目があります。すべての項目を入力してください。");
+      btn.disabled = false;
+      btn.textContent = "一括登録";
+      return;
+    }
+    
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btn.disabled = false;
+        btn.textContent = "一括登録";
+        closeModal("receipt-batch-modal");
+        
+        if (res.success) {
+          alert(res.count + " 件のレシートデータを一括登録しました！");
+          clearAllCache();
+          loadData();
+        } else {
+          alert("登録に失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.textContent = "一括登録";
+        alert("通信エラーが発生しました: " + err.message);
+      })
+      .importTransactions(txList);
+  }
+  
+  function onReceiptAnalysisFailed(error) {
+    closeModal('ocr-loading-modal');
+    alert("レシート解析通信中にエラーが発生しました:\n" + error.message);
+  }
+
+  // ==========================================
+  // 設定保存処理
+  // ==========================================
+  
+  function saveSettings() {
+    const key = document.getElementById("settings-gemini-key").value.trim();
+    
+    if (key === "⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎") {
+      closeModal('settings-modal');
+      return;
+    }
+    
+    // クライアント側(localStorage)にも保存（簡易的なBase64エンコード）
+    if (key) {
+      localStorage.setItem("_hk_session_data", btoa(key));
+    } else {
+      localStorage.removeItem("_hk_session_data");
+    }
+    
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res.success) {
+          closeModal('settings-modal');
+          alert("設定を保存しました。画面をリロードします。");
+          clearAllCache();
+          loadData();
+        } else {
+          alert("保存に失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(err => {
+        alert("設定保存中にエラーが発生しました: " + err.message);
+      })
+      .saveGeminiApiKey(key);
+  }
+
+  // ==========================================
+  // モーダル制御ユーティリティ
+  // ==========================================
+  
+  function openModal(id) {
+    const modal = document.getElementById(id);
+    modal.classList.add("active");
+    
+    if (id === 'settings-modal') {
+      const keyInput = document.getElementById("settings-gemini-key");
+      let hasLocalKey = false;
+      try { hasLocalKey = !!localStorage.getItem("_hk_session_data"); } catch(e) {}
+      
+      if ((appData && appData.hasGeminiKey) || hasLocalKey) {
+        keyInput.value = "⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎⚫︎";
+      } else {
+        keyInput.value = "";
+        keyInput.placeholder = "AI StudioのAPIキーを入力してください (AIzaSy...)";
+      }
+    }
+  }
+
+  function closeModal(id) {
+    document.getElementById(id).classList.remove("active");
+  }
+
+  function togglePasswordVisibility(inputId) {
+    const input = document.getElementById(inputId);
+    const eye = document.getElementById(inputId + "-eye");
+    if (input.type === "password") {
+      input.type = "text";
+      eye.setAttribute("data-lucide", "eye-off");
+    } else {
+      input.type = "password";
+      eye.setAttribute("data-lucide", "eye");
+    }
+    lucide.createIcons();
+  }
+
+  // ==========================================
+  // 取引フィルター制御関数
+  // ==========================================
+
+  function openFilterModal() {
+    if (filterCategoryChips) {
+      filterCategoryChips.setValue(activeFilters.categories.join(','));
+    }
+    if (filterPaidByChips) {
+      filterPaidByChips.setValue(activeFilters.paidBy.join(','));
+    }
+    openModal('filter-modal');
+  }
+
+  function applyFilters() {
+    if (filterCategoryChips && filterPaidByChips) {
+      const selectedCats = filterCategoryChips.getValue();
+      const selectedPaidBys = filterPaidByChips.getValue();
+      
+      activeFilters.categories = selectedCats ? selectedCats.split(',') : [];
+      activeFilters.paidBy = selectedPaidBys ? selectedPaidBys.split(',') : [];
+      
+      renderActiveFilters();
+      
+      if (appData && appData.transactions) {
+        updateHistoryTable(filterTransactions(appData.transactions));
+      }
+    }
+    closeModal('filter-modal');
+  }
+
+  function clearFilterSelection() {
+    if (filterCategoryChips) {
+      filterCategoryChips.setValue('');
+    }
+    if (filterPaidByChips) {
+      filterPaidByChips.setValue('');
+    }
+  }
+
+  function renderActiveFilters() {
+    const container = document.getElementById("active-filters-container");
+    if (!container) return;
+    container.innerHTML = "";
+    
+    const hasFilters = activeFilters.categories.length > 0 || activeFilters.paidBy.length > 0;
+    if (!hasFilters) return;
+    
+    activeFilters.categories.forEach(cat => {
+      const badge = document.createElement("div");
+      badge.className = "active-filter-badge filter-category";
+      badge.innerHTML = `
+        <span>${escapeHtml(cat)}</span>
+        <span class="remove-icon" onclick="removeSingleFilter('categories', '${escapeHtml(cat)}')">&times;</span>
+      `;
+      container.appendChild(badge);
+    });
+    
+    activeFilters.paidBy.forEach(user => {
+      const badge = document.createElement("div");
+      badge.className = "active-filter-badge filter-paid_by";
+      badge.innerHTML = `
+        <span>${escapeHtml(user)}</span>
+        <span class="remove-icon" onclick="removeSingleFilter('paidBy', '${escapeHtml(user)}')">&times;</span>
+      `;
+      container.appendChild(badge);
+    });
+    
+    // クリアボタンを追加 (ゴミ箱アイコンのみ)
+    const clearBtn = document.createElement("button");
+    clearBtn.className = "btn btn-secondary";
+    clearBtn.style.cssText = "width: 22px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-card); color: var(--text-secondary);";
+    clearBtn.innerHTML = `<i data-lucide="trash-2" style="width: 12px; height: 12px;"></i>`;
+    clearBtn.title = "フィルターをすべてクリア";
+    clearBtn.onclick = clearAllFilters;
+    container.appendChild(clearBtn);
+    
+    lucide.createIcons();
+  }
+
+  function clearAllFilters() {
+    activeFilters.categories = [];
+    activeFilters.paidBy = [];
+    
+    if (filterCategoryChips) {
+      filterCategoryChips.setValue('');
+    }
+    if (filterPaidByChips) {
+      filterPaidByChips.setValue('');
+    }
+    
+    renderActiveFilters();
+    if (appData && appData.transactions) {
+      updateHistoryTable(filterTransactions(appData.transactions));
+    }
+  }
+
+  function removeSingleFilter(type, value) {
+    if (type === 'categories') {
+      activeFilters.categories = activeFilters.categories.filter(c => c !== value);
+      if (filterCategoryChips) {
+        filterCategoryChips.setValue(activeFilters.categories.join(','));
+      }
+    } else if (type === 'paidBy') {
+      activeFilters.paidBy = activeFilters.paidBy.filter(p => p !== value);
+      if (filterPaidByChips) {
+        filterPaidByChips.setValue(activeFilters.paidBy.join(','));
+      }
+    }
+    
+    renderActiveFilters();
+    if (appData && appData.transactions) {
+      updateHistoryTable(filterTransactions(appData.transactions));
+    }
+  }
+
+  function filterTransactions(transactions) {
+    if (!transactions) return [];
+    
+    const hasCategoryFilter = activeFilters.categories.length > 0;
+    const hasPaidByFilter = activeFilters.paidBy.length > 0;
+    
+    if (!hasCategoryFilter && !hasPaidByFilter) {
+      return transactions;
+    }
+    
+    return transactions.filter(tx => {
+      const matchCategory = !hasCategoryFilter || activeFilters.categories.includes(tx.category);
+      const matchPaidBy = !hasPaidByFilter || activeFilters.paidBy.includes(tx.paid_by);
+      return matchCategory && matchPaidBy;
+    });
+  }
+
+  // ==========================================
+  // 一般ユーティリティ
+  // ==========================================
+  
+  function formatJapaneseDate(dateStr) {
+    if (!dateStr) return "";
+    const str = String(dateStr);
+    // yyyy-MM-dd もしくは yyyy/MM/dd 形式の場合、タイムゾーンの影響を避けるため手動でパースする
+    const parts = str.split(/[-/]/);
+    if (parts.length === 3) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+        return `${year}年${month}月${day}日`;
+      }
+    }
+    // フォールバック
+    const date = new Date(str.replace(/-/g, "/"));
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+    return `${year}年${month}月${day}日`;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function escapeJsStr(str) {
+    if (!str) return "";
+    return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+  }
+
+  // ==========================================
+  // 年間ダッシュボードの制御ロジック
+  // ==========================================
+
+  /**
+   * 月次帳簿と年間ダッシュボードのタブ切り替え
+   */
+  function switchView(viewType) {
+    const tabMonthly = document.getElementById("tab-monthly");
+    const tabYearly = document.getElementById("tab-yearly");
+    const viewMonthly = document.getElementById("monthly-view");
+    const viewYearly = document.getElementById("yearly-view");
+
+    if (viewType === 'monthly') {
+      tabMonthly.classList.add("active");
+      tabYearly.classList.remove("active");
+      viewMonthly.classList.add("active");
+      viewYearly.classList.remove("active");
+
+      // ダッシュボードから月次への遷移時の「年月」同期処理
+      const today = new Date();
+      const todayYear = today.getFullYear();
+      const todayMonth = ("0" + (today.getMonth() + 1)).slice(-2);
+
+      if (currentYear === todayYear) {
+        // 現在の現実の日付と同じ年の場合：現在の日付の月次のページ
+        currentMonth = `${todayYear}-${todayMonth}`;
+        AppLogger.log("UI", `ダッシュボードから月次へ切り替え: 表示年が現在の現実の年（${todayYear}年）と同一のため、当月（${currentMonth}）に設定します。`);
+      } else {
+        // それ以外の場合：ダッシュボードで開いている年の12月のページ
+        currentMonth = `${currentYear}-12`;
+        AppLogger.log("UI", `ダッシュボードから月次へ切り替え: 表示年が現在の現実の年（${todayYear}年）と異なるため、ダッシュボード年の12月（${currentMonth}）に設定します。`);
+      }
+
+      // インプット要素と表示表示を更新
+      document.getElementById("month-input").value = currentMonth;
+      if (typeof window.updateMonthPickerDisplay === "function") {
+        window.updateMonthPickerDisplay();
+      }
+
+      // 編集モードを抜ける
+      cancelEdit();
+
+      loadData();
+    } else if (viewType === 'yearly') {
+      tabMonthly.classList.remove("active");
+      tabYearly.classList.add("active");
+      viewMonthly.classList.remove("active");
+      viewYearly.classList.add("active");
+
+      // 月次からダッシュボードへの遷移時の「年」同期処理
+      const targetYear = parseInt(currentMonth.split("-")[0]);
+      currentYear = targetYear;
+      
+      AppLogger.log("UI", `月次からダッシュボードへ切り替え: 月次の表示年（${targetYear}年）にダッシュボードの年を同期します。`);
+      document.getElementById("yearly-year-display").textContent = currentYear + "年";
+
+      loadYearlyData();
+    }
+  }
+
+  /**
+   * 年の切り替え調整
+   */
+  function adjustYear(diff) {
+    currentYear += diff;
+    document.getElementById("yearly-year-display").textContent = currentYear + "年";
+    loadYearlyData();
+  }
+
+  let activePrefetchYear = null;
+  let prefetchPendingYear = null;
+  let prefetchYearSuccessCallback = null;
+
+  /**
+   * サーバーから年間データをロード（キャッシュ対応 ＆ SWRパターン）
+   */
+  function loadYearlyData() {
+    AppLogger.log("UI", `${currentYear}年の年間データ取得を開始します。`);
+    document.getElementById("yearly-year-display").textContent = currentYear + "年";
+    
+    const cacheObj = getCacheFromStorage();
+    if (cacheObj.clientDbLastUpdated) {
+      clientDbLastUpdated = cacheObj.clientDbLastUpdated;
+    }
+
+    let isFromCacheApplied = false;
+    const cachedEntry = cacheObj.yearlyCache[String(currentYear)];
+
+    if (cachedEntry && cachedEntry.timestamp === clientDbLastUpdated) {
+      AppLogger.log("DATABASE", `${currentYear}年の有効な年間キャッシュが見つかりました。キャッシュから仮ロードします。`, { timestamp: clientDbLastUpdated });
+      onYearlyDataLoaded(cachedEntry.data, true);
+      isFromCacheApplied = true;
+    } else if (cachedEntry) {
+      AppLogger.log("DATABASE", `${currentYear}年の年間キャッシュは存在しますが、タイムスタンプが古い、または不一致です。`, { cacheTs: cachedEntry.timestamp, clientDbLastUpdated });
+    }
+
+    // 表示年のバックグラウンド・スタンプチェック (SWR: Stale-While-Revalidate)
+    if (isFromCacheApplied) {
+      AppLogger.log("DATABASE", `${currentYear}年: 年間キャッシュを仮表示しました。バックグラウンドで最新タイムスタンプを確認します...`);
+      const checkedYear = String(currentYear);
+      
+      startSyncAnimation('syncing');
+      
+      google.script.run
+        .withSuccessHandler(function(serverTs) {
+          stopSyncAnimation();
+          if (checkedYear !== String(currentYear)) {
+            AppLogger.log("SYSTEM", `年間タイムスタンプ確認中に表示年が ${checkedYear} から ${currentYear} に変更されたため、結果を破棄します。`);
+            return;
+          }
+          if (serverTs && clientDbLastUpdated && serverTs !== clientDbLastUpdated) {
+            AppLogger.log("DATABASE", `年間タイムスタンプ差異検知: サーバーの最新スタンプ（${serverTs}）とローカル（${clientDbLastUpdated}）に差異があります。キャッシュを廃棄して年間データを再取得します。`);
+            clearAllCache();
+            fetchYearlyDataFromServerDirectly();
+          } else {
+            AppLogger.log("DATABASE", `年間タイムスタンプ確認完了: サーバーとの差異はありませんでした。年間キャッシュは最新です。`);
+          }
+        })
+        .withFailureHandler(function(err) {
+          stopSyncAnimation();
+          console.warn("Failed to check yearly timestamp from background: " + err.message);
+        })
+        .getLatestTimestamp();
+        
+      return;
+    }
+
+    fetchYearlyDataFromServerDirectly();
+  }
+
+  function fetchYearlyDataFromServerDirectly() {
+    const targetYearStr = String(currentYear);
+    if (activePrefetchYear === targetYearStr) {
+      AppLogger.log("API", `${targetYearStr}年は現在プリフェッチ中のため、通信の完了を待機します。`);
+      prefetchPendingYear = targetYearStr;
+      prefetchYearSuccessCallback = function(data) {
+        AppLogger.log("API", `${targetYearStr}年のプリフェッチ待機が完了し、データを適用します。`);
+        onYearlyDataLoaded(data);
+      };
+      return;
+    }
+
+    prefetchPendingYear = null;
+    prefetchYearSuccessCallback = null;
+
+    AppLogger.log("API", `サーバーから ${targetYearStr}年の年間データを取得中...`);
+    google.script.run
+      .withSuccessHandler(function(response) {
+        AppLogger.log("API", `サーバーから ${targetYearStr}年の年間データを正常に取得しました。`);
+        onYearlyDataLoaded(response);
+      })
+      .withFailureHandler(err => {
+        AppLogger.log("ERROR", `${targetYearStr}年の年間データ取得に失敗しました。`, err);
+        alert("年間データの取得に失敗しました: " + err.message);
+      })
+      .getYearlyData(targetYearStr);
+  }
+
+  /**
+   * 年間データ取得成功時の処理
+   */
+  function onYearlyDataLoaded(response, isFromCache = false) {
+    AppLogger.log("UI", `${response.year}年の年間データを画面に描画します。ソース: ${isFromCache ? 'キャッシュ' : 'サーバー'}`);
+    
+    if (!response) {
+      alert("年間データの取得に失敗しました（サーバーからの応答がありません）。");
+      return;
+    }
+    if (!response.success) {
+      alert("エラーが発生しました: " + response.message);
+      return;
+    }
+
+    yearlyData = response;
+
+    if (!isFromCache) {
+      saveYearlyDataToCache(response.year, response);
+    }
+
+    const total = response.analysis.totalExpense;
+    document.getElementById("yearly-stat-total").textContent = `¥${total.toLocaleString()}`;
+    
+    // 取引実績（合計支出が0より大きい）のある月数をカウント
+    const activeMonths = response.monthlyData.filter(d => d.total > 0).length;
+    const avg = activeMonths > 0 ? Math.round(total / activeMonths) : 0;
+    document.getElementById("yearly-stat-average").textContent = `¥${avg.toLocaleString()}`;
+
+    updateYearlyCharts(response);
+    updateYearlyTables(response);
+
+    // ダッシュボード表示中の場合、前後1年のデータをプリフェッチする
+    const tabYearly = document.getElementById("tab-yearly");
+    if (tabYearly && tabYearly.classList.contains("active")) {
+      prefetchYears(String(currentYear));
+    }
+  }
+
+  // 年間データの優先順位付きプリフェッチ (Offsets: [-1, 1])
+  function prefetchYears(baseYearStr) {
+    const offsets = [ -1, 1 ];
+    let idx = 0;
+    
+    AppLogger.log("API", `${baseYearStr}年を起点とする年間データ（${offsets.join(', ')}年）のプリフェッチ処理を開始します。`);
+
+    function next() {
+      if (String(currentYear) !== baseYearStr) {
+        AppLogger.log("SYSTEM", `表示年が変更されたため、${baseYearStr}年を起点とする年間プリフェッチを中断します。`);
+        return;
+      }
+      if (idx >= offsets.length) {
+        activePrefetchYear = null;
+        AppLogger.log("SYSTEM", "年間データのプリフェッチ処理がすべて完了しました。");
+        return;
+      }
+
+      const offset = offsets[idx];
+      idx++;
+
+      const targetYear = String(parseInt(baseYearStr) + offset);
+
+      const cacheObj = getCacheFromStorage();
+      const cached = cacheObj.yearlyCache[targetYear];
+      if (cached && cached.timestamp === clientDbLastUpdated) {
+        AppLogger.log("DATABASE", `${targetYear}年はすでに最新の年間キャッシュが存在するため、プリフェッチをスキップします。`);
+        next();
+        return;
+      }
+
+      activePrefetchYear = targetYear;
+      AppLogger.log("API", `${targetYear}年の年間データ プリフェッチ（バックグラウンド取得）を開始します...`);
+
+      google.script.run
+        .withSuccessHandler(function(response) {
+          if (response && response.success) {
+            AppLogger.log("API", `${targetYear}年の年間データ プリフェッチに成功しました。キャッシュに保存します。`);
+            saveYearlyDataToCache(targetYear, response);
+            if (prefetchPendingYear === targetYear && prefetchYearSuccessCallback) {
+              AppLogger.log("API", `${targetYear}年は現在表示要求中のため、待機中のコールバックを実行して即時描画します。`);
+              const cb = prefetchYearSuccessCallback;
+              prefetchPendingYear = null;
+              prefetchYearSuccessCallback = null;
+              cb(response);
+            }
+          } else {
+            AppLogger.log("ERROR", `${targetYear}年の年間データ プリフェッチレスポンスが異常です。`, response);
+          }
+          next();
+        })
+        .withFailureHandler(function(err) {
+          AppLogger.log("ERROR", `${targetYear}年の年間データ プリフェッチ通信に失敗しました。`, err);
+          next();
+        })
+        .getYearlyData(targetYear);
+    }
+
+    next();
+  }
+
+  // 現在開いている月の「年」の年間データをプリフェッチする
+  function prefetchYearOfCurrentMonth() {
+    const targetYear = currentMonth.split("-")[0];
+    const cacheObj = getCacheFromStorage();
+    const cached = cacheObj.yearlyCache[targetYear];
+    
+    if (cached && cached.timestamp === clientDbLastUpdated) {
+      AppLogger.log("DATABASE", `月次閲覧中: ${targetYear}年の年間データはすでに最新のキャッシュが存在するため、プリフェッチをスキップします。`);
+      return;
+    }
+
+    AppLogger.log("API", `月次閲覧中: ${targetYear}年の年間データのプリフェッチ（バックグラウンド取得）を開始します...`);
+    
+    activePrefetchYear = targetYear;
+    
+    google.script.run
+      .withSuccessHandler(function(response) {
+        if (response && response.success) {
+          AppLogger.log("API", `月次閲覧中: ${targetYear}年の年間データ プリフェッチに成功しました。キャッシュに保存します。`);
+          saveYearlyDataToCache(targetYear, response);
+        } else {
+          AppLogger.log("ERROR", `月次閲覧中: ${targetYear}年の年間データ プリフェッチレスポンスが異常です。`, response);
+        }
+        if (activePrefetchYear === targetYear) {
+          activePrefetchYear = null;
+        }
+      })
+      .withFailureHandler(function(err) {
+        AppLogger.log("ERROR", `月次閲覧中: ${targetYear}年の年間データ プリフェッチ通信に失敗しました。`, err);
+        if (activePrefetchYear === targetYear) {
+          activePrefetchYear = null;
+        }
+      })
+      .getYearlyData(targetYear);
+  }
+
+  /**
+   * 年間グラフの更新
+   */
+  function updateYearlyCharts(response) {
+    const trendCtx = document.getElementById("yearlyTrendChart").getContext("2d");
+    const catCtx = document.getElementById("yearlyCategoryChart").getContext("2d");
+
+    const labels = response.monthlyData.map(d => d.month);
+    
+    const themeColors = getChartThemeColors();
+    const colors = ['#2eaadc', '#ae3ec9', '#37b24d', '#f76707', '#f59f00', '#f03e3e'];
+    const datasets = response.users.map((user, idx) => {
+      return {
+        label: user + "が支払",
+        data: response.monthlyData.map(d => d.paidBy[user] || 0),
+        backgroundColor: colors[idx % colors.length],
+        borderWidth: 1,
+        borderColor: themeColors.cardBg
+      };
+    });
+
+    if (yearlyTrendChart) {
+      yearlyTrendChart.destroy();
+    }
+
+    yearlyTrendChart = new Chart(trendCtx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'top',
+            labels: {
+              color: themeColors.text,
+              font: { size: 10, family: 'Inter' }
+            }
+          },
+          tooltip: {
+            mode: 'index',
+            intersect: false,
+            callbacks: {
+              label: function(context) {
+                const val = context.raw || 0;
+                return `${context.dataset.label}: ¥${val.toLocaleString()}`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            stacked: true,
+            grid: { color: themeColors.grid },
+            ticks: { color: themeColors.text }
+          },
+          y: {
+            stacked: true,
+            grid: { color: themeColors.grid },
+            ticks: {
+              color: themeColors.text,
+              callback: function(value) {
+                return '¥' + value.toLocaleString();
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const categories = Object.keys(response.categoryTotals);
+    const catData = Object.values(response.categoryTotals);
+
+    if (yearlyCategoryChart) {
+      yearlyCategoryChart.destroy();
+    }
+
+    if (categories.length === 0 || catData.reduce((a, b) => a + b, 0) === 0) {
+      yearlyCategoryChart = new Chart(catCtx, {
+        type: 'doughnut',
+        data: {
+          labels: ['データなし'],
+          datasets: [{
+            data: [1],
+            backgroundColor: [themeColors.emptyBg],
+            borderWidth: 1,
+            borderColor: themeColors.cardBg
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false }
+          },
+          cutout: '75%'
+        }
+      });
+      return;
+    }
+
+    const catColors = [
+      '#2eaadc', '#ae3ec9', '#37b24d', '#f76707', '#f03e3e', '#f59f00', '#748ffc', '#10b981', '#94a3b8'
+    ];
+
+    yearlyCategoryChart = new Chart(catCtx, {
+      type: 'doughnut',
+      data: {
+        labels: categories,
+        datasets: [{
+          data: catData,
+          backgroundColor: catColors.slice(0, categories.length),
+          borderWidth: 1,
+          borderColor: themeColors.cardBg,
+          hoverOffset: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: window.innerWidth < 600 ? 'bottom' : 'right',
+            labels: {
+              boxWidth: 12,
+              color: themeColors.text,
+              font: { size: 10, family: 'Inter' }
+            }
+          },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const val = context.raw || 0;
+                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                const pct = Math.round((val / total) * 100);
+                return `${context.label}: ¥${val.toLocaleString()} (${pct}%)`;
+              }
+            }
+          }
+        },
+        cutout: '70%'
+      }
+    });
+  }
+
+  /**
+   * 年間テーブル・累計バランスの更新
+   */
+  function updateYearlyTables(response) {
+    const balanceContainer = document.getElementById("yearly-balance-results");
+    balanceContainer.innerHTML = "";
+    
+    let balanceHtml = '<div style="margin-bottom: 8px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 8px; width: 100%;">';
+    response.analysis.userBalances.forEach(b => {
+      const balanceSign = b.balance > 0 ? "+" : "";
+      const balanceColor = b.balance > 0 ? "#51cf66" : (b.balance < 0 ? "#ff6b6b" : "inherit");
+      
+      balanceHtml += `
+        <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px; color:var(--text-secondary);">
+          <span>${b.user} (支出: ¥${b.used.toLocaleString()} / 支払: ¥${b.paid.toLocaleString()})</span>
+          <span style="color: ${balanceColor}; font-weight:600;">${balanceSign}¥${b.balance.toLocaleString()}</span>
+        </div>
+      `;
+    });
+    balanceHtml += '</div>';
+    balanceContainer.innerHTML = balanceHtml;
+
+    const instructions = response.analysis.settlementInstructions;
+    if (instructions.length === 0) {
+      balanceContainer.innerHTML += `
+        <div class="settlement-empty">
+          <i data-lucide="smile" style="width:20px; height:20px; display:block; margin:0 auto 8px; color:var(--accent-green);"></i>
+          年間の精算は不要です。全員が均等に負担しています。
+        </div>
+      `;
+    } else {
+      instructions.forEach(ins => {
+        const item = document.createElement("div");
+        item.className = "settlement-item";
+        item.style.width = "100%";
+        item.innerHTML = `
+          <div class="settlement-parties">
+            <span class="settlement-user-pill debtor">${ins.from}</span>
+            <span class="settlement-direction-arrow"><i data-lucide="arrow-right" style="width:14px; height:14px;"></i></span>
+            <span class="settlement-user-pill creditor">${ins.to}</span>
+          </div>
+          <div class="settlement-amount">¥${ins.amount.toLocaleString()}</div>
+        `;
+        balanceContainer.appendChild(item);
+      });
+    }
+    
+    const headerRow = document.getElementById("yearly-table-header");
+    const tbody = document.getElementById("yearly-table-tbody");
+    
+    headerRow.innerHTML = "<th>月</th><th>合計支出</th>";
+    response.users.forEach(u => {
+      const th = document.createElement("th");
+      th.textContent = u + "の支払";
+      headerRow.appendChild(th);
+    });
+    
+    tbody.innerHTML = "";
+    response.monthlyData.forEach(d => {
+      const tr = document.createElement("tr");
+      
+      let rowHtml = `
+        <td style="font-weight: 500;">${d.month}</td>
+        <td class="amount-val" style="font-weight: 600;">¥${d.total.toLocaleString()}</td>
+      `;
+      
+      response.users.forEach(u => {
+        const val = d.paidBy[u] || 0;
+        rowHtml += `<td class="amount-val" style="color: var(--text-secondary);">¥${val.toLocaleString()}</td>`;
+      });
+      
+      tr.innerHTML = rowHtml;
+      tbody.appendChild(tr);
+    });
+    
+    lucide.createIcons();
+  }
+
+  /**
+   * 数式の評価（安全なeval代替）
+   */
+  function evaluateMathExpression(expr) {
+    if (!expr) return null;
+    let sanitized = expr.replace(/×/g, '*').replace(/÷/g, '/');
+    sanitized = sanitized.replace(/[^0-9+\-*/().\s]/g, '');
+    if (!sanitized) return null;
+    
+    try {
+      const result = Function('"use strict";return (' + sanitized + ')')();
+      if (typeof result === 'number' && !isNaN(result) && isFinite(result)) {
+        return Math.round(result);
+      }
+    } catch (e) {
+      // ignore errors
+    }
+    return null;
+  }
+
+  // ==========================================
+  // CSVインポート管理
+  // ==========================================
+  let parsedCsvTransactions = [];
+
+  function handleCsvUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const text = e.target.result;
+      try {
+        const rows = parseCSV(text);
+        if (rows.length < 2) {
+          alert("CSVファイルが空か、データが含まれていません。");
+          return;
+        }
+        
+        const headerRow = rows[0].map(h => h.trim());
+        const colName = headerRow.indexOf("名前");
+        const colDate = headerRow.indexOf("日付");
+        const colCategory = headerRow.indexOf("項目");
+        const colPayer = headerRow.indexOf("支払い");
+        const colAmount = headerRow.indexOf("金額");
+        const colSplit = headerRow.indexOf("立替");
+        
+        if (colName === -1 || colDate === -1 || colCategory === -1 || colPayer === -1 || colAmount === -1 || colSplit === -1) {
+          alert("CSVのヘッダーに必要な項目（名前, 日付, 項目, 支払い, 金額, 立替）が含まれていません。");
+          return;
+        }
+        
+        parsedCsvTransactions = [];
+        const previewTbody = document.getElementById("csv-preview-tbody");
+        previewTbody.innerHTML = "";
+        
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          if (row.length < 6 || row.every(val => val.trim() === "")) continue;
+          
+          const title = (row[colName] || "").trim();
+          const rawDate = (row[colDate] || "").trim();
+          const category = (row[colCategory] || "").trim();
+          const paidBy = (row[colPayer] || "").trim();
+          const rawAmount = (row[colAmount] || "").trim();
+          const splitText = (row[colSplit] || "").trim();
+          
+          const date = convertJapaneseDateToISO(rawDate);
+          const amount = Number(rawAmount.replace(/,/g, "")) || 0;
+          
+          let splitType = "割り勘";
+          let beneficiaries = "";
+          
+          if (splitText === "割り勘") {
+            splitType = "割り勘";
+            beneficiaries = "";
+          } else if (splitText === "個別" || splitText.includes("自己負担")) {
+            splitType = "個別";
+            beneficiaries = paidBy;
+          } else {
+            const matchFront = splitText.match(/(.+)の分/);
+            if (matchFront) {
+              splitType = "立て替え";
+              beneficiaries = matchFront[1].trim();
+            } else {
+              splitType = "割り勘";
+              beneficiaries = "";
+            }
+          }
+          
+          if (!title || !date || amount <= 0 || !paidBy) {
+            console.warn(`無効な行スキップ: 行番号 ${i + 1}, タイトル: ${title}, 日付: ${date}, 金額: ${amount}`);
+            continue;
+          }
+          
+          const tx = {
+            date: date,
+            title: title,
+            category: category,
+            amount: amount,
+            paid_by: paidBy,
+            split_type: splitType,
+            beneficiaries: splitType === "個別" ? paidBy : beneficiaries,
+            memo: "CSVインポート"
+          };
+          
+          parsedCsvTransactions.push(tx);
+          
+          // プレビュー行の追加
+          const tr = document.createElement("tr");
+          let splitBadge = `<span class="badge badge-split">👥 割り勘</span>`;
+          if (splitType === "立て替え") {
+            splitBadge = `<span class="badge badge-fronting">🙋‍♂️ 立て替え</span>`;
+          } else if (splitType === "個別") {
+            splitBadge = `<span class="badge badge-individual">👤 個別</span>`;
+          }
+          
+          let benBadge = `<span class="badge badge-split">全員</span>`;
+          if (splitType === "個別") {
+            benBadge = `<span class="badge badge-individual">${paidBy}</span>`;
+          } else if (beneficiaries) {
+            benBadge = `<span class="badge badge-fronting">${beneficiaries}</span>`;
+          }
+          
+          tr.innerHTML = `
+            <td><div style="font-weight: 500;">${escapeHtml(title)}</div></td>
+            <td style="color: var(--text-secondary);">${formatJapaneseDate(date)}</td>
+            <td><span class="badge badge-category">${escapeHtml(category)}</span></td>
+            <td><span class="badge badge-user">${escapeHtml(paidBy)}</span></td>
+            <td class="text-right amount-val">¥${amount.toLocaleString()}</td>
+            <td>${splitBadge}</td>
+            <td>${benBadge}</td>
+          `;
+          previewTbody.appendChild(tr);
+        }
+        
+        if (parsedCsvTransactions.length === 0) {
+          alert("取り込める有効な取引データが見つかりませんでした。");
+          return;
+        }
+        
+        document.getElementById("csv-import-count").textContent = parsedCsvTransactions.length;
+        openModal("csv-preview-modal");
+        lucide.createIcons();
+      } catch (err) {
+        alert("CSVのパース中にエラーが発生しました: " + err.message);
+      } finally {
+        event.target.value = ""; // リセット
+      }
+    };
+    reader.readAsText(file, "UTF-8");
+  }
+
+  function confirmImport() {
+    if (parsedCsvTransactions.length === 0) return;
+    
+    const importBtn = document.getElementById("csv-import-btn");
+    importBtn.disabled = true;
+    importBtn.textContent = "インポート中...";
+    
+    google.script.run
+      .withSuccessHandler(res => {
+        importBtn.disabled = false;
+        importBtn.textContent = "インポート実行";
+        closeModal("csv-preview-modal");
+        
+        if (res.success) {
+          alert(`${res.count} 件の取引データを一括インポートしました！\n新しいメンバーやカテゴリーもマスタに自動追加されました。`);
+          clearAllCache();
+          loadData(); // 表示更新
+        } else {
+          alert("インポートに失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(err => {
+        importBtn.disabled = false;
+        importBtn.textContent = "インポート実行";
+        alert("インポート中に通信エラーが発生しました: " + err.message);
+      })
+      .importTransactions(parsedCsvTransactions);
+  }
+
+  // CSVパース (RFC 4180簡易準拠)
+  function parseCSV(text) {
+    const lines = [];
+    let row = [""];
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      const next = text[i+1];
+      if (c === '"') {
+        if (inQuotes && next === '"') {
+          row[row.length - 1] += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (c === ',' && !inQuotes) {
+        row.push('');
+      } else if ((c === '\r' || c === '\n') && !inQuotes) {
+        if (c === '\r' && next === '\n') {
+          i++;
+        }
+        lines.push(row);
+        row = [''];
+      } else {
+        row[row.length - 1] += c;
+      }
+    }
+    if (row.length > 1 || row[0] !== '') {
+      lines.push(row);
+    }
+    return lines;
+  }
+
+  // 和暦や「年月日」形式の日付文字列を YYYY-MM-DD に統一
+  function convertJapaneseDateToISO(jpDateStr) {
+    const cleanStr = String(jpDateStr).trim();
+    const matchJp = cleanStr.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+    if (matchJp) {
+      const y = matchJp[1];
+      const m = ("0" + matchJp[2]).slice(-2);
+      const d = ("0" + matchJp[3]).slice(-2);
+      return `${y}-${m}-${d}`;
+    }
+    const matchIso = cleanStr.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (matchIso) {
+      const y = matchIso[1];
+      const m = ("0" + matchIso[2]).slice(-2);
+      const d = ("0" + matchIso[3]).slice(-2);
+      return `${y}-${m}-${d}`;
+    }
+    return "";
+  }
+
+  // ==========================================
+  // 月次精算ステータス管理機能
+  // ==========================================
+
+  /**
+   * 月次精算ステータスの表示更新
+   */
+  /**
+   * 月次精算ステータスの表示更新（複数レコードに対応、アコーディオンUI形式）
+   */
+  function updateSettlementStatusDisplay(records, analysis) {
+    const container = document.getElementById("monthly-settlement-status-container");
+    if (!container) return;
+    
+    container.style.display = "block";
+    
+    // YYYY-MM から 〇月分 を作成。レコードが無ければ現在読み込まれている月を使用
+    const activeMonth = (records && records.length > 0) ? records[0].month : (appData ? appData.month : "");
+    if (!activeMonth) {
+      container.style.display = "none";
+      return;
+    }
+    
+    const monthParts = activeMonth.split("-");
+    const monthNum = parseInt(monthParts[1], 10);
+    const displayMonthName = `${monthNum}月分`;
+    
+    // アコーディオンのHTMLリストを生成
+    let accordionHtml = "";
+    if (records && records.length > 0) {
+      records.forEach(function(rec) {
+        const isPaid = isPaidStatus(rec.status, appData ? appData.masters : null);
+        const statusClass = isPaid ? "badge-status-paid" : "badge-status-unpaid";
+        
+        let detailRowsHtml = `
+          <div class="summary-properties" style="padding-top: 8px;">
+            <div class="property-row">
+              <div class="property-label"><i data-lucide="info"></i>ステータス</div>
+              <div class="property-value">
+                <span class="badge-status ${statusClass}"><span class="badge-status-dot"></span>${escapeHtml(rec.status)}</span>
+              </div>
+            </div>
+        `;
+        
+        if (isPaid) {
+          if (rec.payment_date) {
+            detailRowsHtml += `
+              <div class="property-row">
+                <div class="property-label"><i data-lucide="calendar"></i>支払い日</div>
+                <div class="property-value property-value-text">${formatJapaneseDate(rec.payment_date)}</div>
+              </div>
+            `;
+          }
+          if (rec.payment_pattern) {
+            detailRowsHtml += `
+              <div class="property-row">
+                <div class="property-label"><i data-lucide="shuffle"></i>パターン</div>
+                <div class="property-value"><span class="badge-pattern">${escapeHtml(rec.payment_pattern)}</span></div>
+              </div>
+            `;
+          }
+          if (rec.amount) {
+            detailRowsHtml += `
+              <div class="property-row">
+                <div class="property-label"><i data-lucide="hash"></i>支払額</div>
+                <div class="property-value property-value-amount">¥${Number(rec.amount).toLocaleString()}</div>
+              </div>
+            `;
+          }
+          if (rec.payment_method) {
+            let methodClass = "badge-method-cancel-rent"; // デフォルト
+            if (rec.payment_method === "振込") {
+              methodClass = "badge-method-transfer";
+            } else if (rec.payment_method === "現金") {
+              methodClass = "badge-method-cash";
+            } else if (rec.payment_method === "別の月で帳消し") {
+              methodClass = "badge-method-cancel-other";
+            }
+            detailRowsHtml += `
+              <div class="property-row">
+                <div class="property-label"><i data-lucide="credit-card"></i>支払い方法</div>
+                <div class="property-value"><span class="badge-method ${methodClass}">${escapeHtml(rec.payment_method)}</span></div>
+              </div>
+            `;
+          }
+        }
+        
+        if (rec.memo) {
+          detailRowsHtml += `
+            <div class="property-row">
+              <div class="property-label"><i data-lucide="align-left"></i>メモ</div>
+              <div class="property-value property-value-text" style="white-space: pre-wrap;">${escapeHtml(rec.memo)}</div>
+            </div>
+          `;
+        }
+        
+        detailRowsHtml += `
+            <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; border-top: 1px dashed var(--border-color); padding-top: 10px;">
+              <button class="btn btn-secondary btn-sm" onclick="openSettlementModal('${escapeHtml(rec.id)}')" style="padding: 2px 8px; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;"><i data-lucide="edit-3" style="width: 12px; height: 12px;"></i>編集</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteSettlementStatus('${escapeHtml(rec.id)}')" style="padding: 2px 8px; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;"><i data-lucide="trash-2" style="width: 12px; height: 12px;"></i>削除</button>
+            </div>
+          </div>
+        `;
+        
+        // アコーディオンのサマリーテキスト
+        let summaryText = rec.payment_pattern || "送金記録";
+        if (!isPaid) {
+          summaryText += " (未払い)";
+        }
+        const badgeColor = isPaid ? "var(--accent-green)" : "var(--text-disabled)";
+        
+        accordionHtml += `
+          <div class="settlement-accordion-item" id="accordion-item-${escapeHtml(rec.id)}">
+            <div class="settlement-accordion-header" onclick="toggleAccordion('${escapeHtml(rec.id)}')">
+              <div class="settlement-accordion-summary">
+                <span style="width: 8px; height: 8px; border-radius: 50%; background: ${badgeColor}; display: inline-block; flex-shrink: 0;"></span>
+                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px;">${escapeHtml(summaryText)}</span>
+              </div>
+              <div class="settlement-accordion-amount">¥${Number(rec.amount).toLocaleString()}</div>
+              <div class="settlement-accordion-chevron">
+                <i data-lucide="chevron-down"></i>
+              </div>
+            </div>
+            <div class="settlement-accordion-content">
+              <div class="settlement-accordion-body">
+                ${detailRowsHtml}
+              </div>
+            </div>
+          </div>
+        `;
+      });
+    } else {
+      accordionHtml = `
+        <div class="empty-state" style="padding: 16px 8px; font-size: 0.8rem; color: var(--text-disabled); border: 1px dashed var(--border-color); border-radius: var(--radius-sm); text-align: center;">
+          登録された精算記録はありません。
+        </div>
+      `;
+    }
+    
+    container.innerHTML = `
+      <div class="settlement-status-header" style="margin-bottom: 8px;">
+        <span class="settlement-status-title" style="display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="arrow-right-left" style="width: 16px; height: 16px; color: var(--accent-blue);"></i>
+          ${displayMonthName}の精算記録
+        </span>
+        <button class="btn btn-secondary btn-sm" onclick="openSettlementModal('')" title="精算記録を追加" style="padding: 4px 8px; font-size: 0.75rem; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 4px;">
+          <i data-lucide="plus" style="width: 12px; height: 12px;"></i>追加
+        </button>
+      </div>
+      <div style="margin-top: 10px;">
+        ${accordionHtml}
+      </div>
+    `;
+    
+    lucide.createIcons();
+  }
+
+  /**
+   * ステータス値が「支払い済み」扱いかどうかを判定する
+   */
+  function isPaidStatus(status, masters) {
+    if (!status) return false;
+    const statuses = masters && masters.settlement_statuses ? masters.settlement_statuses : ["未払い", "支払い済み"];
+    
+    if (statuses.length > 0 && status === statuses[0]) {
+      return false;
+    }
+    if (status === "支払い済み" || status.indexOf("済") !== -1 || status.indexOf("完了") !== -1) {
+      return true;
+    }
+    return true;
+  }
+
+  /**
+   * アコーディオンの開閉トグル
+   */
+  function toggleAccordion(id) {
+    const item = document.getElementById(`accordion-item-${id}`);
+    if (!item) return;
+    
+    const isActive = item.classList.contains("active");
+    
+    // 画面の圧迫を防ぐため、他の開いているアコーディオンを閉じる
+    const allItems = document.querySelectorAll(".settlement-accordion-item");
+    allItems.forEach(function(el) {
+      el.classList.remove("active");
+    });
+    
+    if (!isActive) {
+      item.classList.add("active");
+    }
+  }
+
+  /**
+   * 清算状況の編集モーダルを開く（新規追加時は id = ""）
+   */
+  function openSettlementModal(id) {
+    if (!appData) return;
+    
+    const analysis = appData.analysis;
+    const masters = appData.masters;
+    
+    // 対象月の設定
+    const activeMonth = appData.month || "";
+    const monthParts = activeMonth.split("-");
+    const monthNum = parseInt(monthParts[1], 10);
+    document.getElementById("settle-month-display").value = activeMonth ? `${monthParts[0]}年${monthNum}月分` : "";
+    
+    // ID設定
+    document.getElementById("settle-id-input").value = id;
+    
+    const deleteBtn = document.getElementById("settle-delete-btn");
+    
+    let record = null;
+    if (id && appData.settlementRecords) {
+      record = appData.settlementRecords.find(r => r.id === id);
+    }
+    
+    if (record) {
+      // 編集モード
+      if (deleteBtn) deleteBtn.style.display = "block";
+      
+      document.getElementById("settle-status-input").value = record.status || "未払い";
+      onSettleStatusChange(record.status || "未払い");
+      
+      const dateInput = document.getElementById("settle-date-input");
+      const dateVal = record.payment_date ? record.payment_date.substring(0, 10) : getTodayDateString();
+      dateInput.value = dateVal;
+      const displayInput = document.getElementById("settle-date-display-input");
+      if (displayInput) {
+        displayInput.value = dateVal ? dateVal.replace(/-/g, "/") : "";
+      }
+      
+      document.getElementById("settle-pattern-input").value = record.payment_pattern || "";
+      document.getElementById("settle-amount-input").value = record.amount || "";
+      document.getElementById("settle-method-input").value = record.payment_method || "";
+      document.getElementById("settle-memo-input").value = record.memo || "";
+    } else {
+      // 新規登録モード
+      if (deleteBtn) deleteBtn.style.display = "none";
+      
+      const statusInput = document.getElementById("settle-status-input");
+      const defaultStatus = masters && masters.settlement_statuses && masters.settlement_statuses.length > 0 ? masters.settlement_statuses[0] : "未払い";
+      statusInput.value = defaultStatus;
+      onSettleStatusChange(defaultStatus);
+      
+      const dateVal = getTodayDateString();
+      document.getElementById("settle-date-input").value = dateVal;
+      const displayInput = document.getElementById("settle-date-display-input");
+      if (displayInput) {
+        displayInput.value = dateVal ? dateVal.replace(/-/g, "/") : "";
+      }
+      document.getElementById("settle-method-input").value = "";
+      document.getElementById("settle-memo-input").value = "";
+      
+      // 自動補完：未払いの送金指示（精算指示）があり、まだ登録されていないものをデフォルトセット
+      let defaultPattern = "";
+      let defaultAmount = "";
+      if (analysis && analysis.settlementInstructions && analysis.settlementInstructions.length > 0) {
+        // すでに登録されているパターンの一覧
+        const registeredPatterns = (appData.settlementRecords || []).map(r => r.payment_pattern);
+        
+        // 未登録の最初の精算指示を探す
+        const nextInstruction = analysis.settlementInstructions.find(ins => {
+          const pat = `${ins.from}から${ins.to}へ`;
+          return registeredPatterns.indexOf(pat) === -1;
+        }) || analysis.settlementInstructions[0];
+        
+        if (nextInstruction) {
+          defaultPattern = `${nextInstruction.from}から${nextInstruction.to}へ`;
+          defaultAmount = nextInstruction.amount;
+        }
+      }
+      
+      document.getElementById("settle-pattern-input").value = defaultPattern;
+      document.getElementById("settle-amount-input").value = defaultAmount;
+    }
+    
+    openModal("settlement-status-modal");
+  }
+
+  function getTodayDateString() {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  /**
+   * モーダル内のステータス変更イベント
+   */
+  function onSettleStatusChange(value) {
+    const detailsArea = document.getElementById("settle-details-area");
+    if (!detailsArea) return;
+    
+    const isPaid = isPaidStatus(value, appData ? appData.masters : null);
+    
+    if (isPaid) {
+      detailsArea.style.display = "flex";
+      document.getElementById("settle-date-display-input").required = true;
+      document.getElementById("settle-pattern-input").required = true;
+      document.getElementById("settle-amount-input").required = true;
+      document.getElementById("settle-method-input").required = true;
+    } else {
+      detailsArea.style.display = "none";
+      document.getElementById("settle-date-display-input").required = false;
+      document.getElementById("settle-pattern-input").required = false;
+      document.getElementById("settle-amount-input").required = false;
+      document.getElementById("settle-method-input").required = false;
+    }
+  }
+
+  /**
+   * 清算状況の保存処理
+   */
+  function submitSettlementStatus(event) {
+    event.preventDefault();
+    if (!appData) return;
+    
+    const saveBtn = event.target.querySelector('button[type="submit"]');
+    const originalText = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "保存中...";
+    
+    const id = document.getElementById("settle-id-input").value;
+    const status = document.getElementById("settle-status-input").value;
+    const isPaid = isPaidStatus(status, appData.masters);
+    
+    const data = {
+      id: id,
+      month: appData.month,
+      status: status,
+      payment_date: isPaid ? document.getElementById("settle-date-input").value : "",
+      payment_pattern: isPaid ? document.getElementById("settle-pattern-input").value : "",
+      amount: isPaid ? Number(document.getElementById("settle-amount-input").value) || 0 : 0,
+      payment_method: isPaid ? document.getElementById("settle-method-input").value : "",
+      memo: document.getElementById("settle-memo-input").value.trim()
+    };
+    
+    google.script.run
+      .withSuccessHandler(res => {
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalText;
+        closeModal("settlement-status-modal");
+        
+        if (res.success) {
+          alert("精算記録を保存しました！");
+          clearAllCache();
+          loadData(); // 画面リロード
+        } else {
+          alert("保存に失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(err => {
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalText;
+        alert("通信エラーが発生しました: " + err.message);
+      })
+      .saveSettlementStatus(data);
+  }
+
+  /**
+   * モーダル内からの精算記録削除処理
+   */
+  function deleteSettlementStatusFromModal() {
+    const id = document.getElementById("settle-id-input").value;
+    if (!id) return;
+    closeModal("settlement-status-modal");
+    deleteSettlementStatus(id);
+  }
+
+  /**
+   * 精算記録の削除実行
+   */
+  function deleteSettlementStatus(id) {
+    if (!confirm("この精算記録を削除してもよろしいですか？\nこの操作は取り消せません。")) return;
+    
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res.success) {
+          alert("精算記録を削除しました。");
+          clearAllCache();
+          loadData();
+        } else {
+          alert("削除に失敗しました: " + res.message);
+        }
+      })
+      .withFailureHandler(err => {
+        alert("通信エラーが発生しました: " + err.message);
+      })
+      .deleteSettlementStatus(id);
+  }
+
+  // ==========================================
+  // Google Drive ファイル選択機能
+  // ==========================================
+  let driveFilesCache = []; // 取得したファイルのキャッシュ
+  let selectedDriveFileId = null;
+  let currentDriveFilter = "all";
+
+  function openDriveFilePicker() {
+    openModal('drive-picker-modal');
+    
+    // UI初期化
+    document.getElementById("drive-search-input").value = "";
+    document.getElementById("drive-picker-submit").disabled = true;
+    selectedDriveFileId = null;
+    currentDriveFilter = "all";
+    updateFilterBtnActiveState();
+    
+    showDriveLoading(true);
+    google.script.run
+      .withSuccessHandler(function(response) {
+        showDriveLoading(false);
+        if (response.success) {
+          driveFilesCache = response.files;
+          renderDriveFiles();
+        } else {
+          alert(response.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        showDriveLoading(false);
+        alert("Googleドライブとの通信に失敗しました: " + err.message);
+      })
+      .getRecentDriveFiles();
+  }
+
+  function showDriveLoading(isLoading) {
+    const listEl = document.getElementById("drive-file-list");
+    const loadingEl = document.getElementById("drive-picker-loading");
+    const emptyEl = document.getElementById("drive-picker-empty");
+    
+    if (isLoading) {
+      listEl.style.display = "none";
+      loadingEl.style.display = "flex";
+      emptyEl.style.display = "none";
+    } else {
+      listEl.style.display = "flex";
+      loadingEl.style.display = "none";
+    }
+  }
+
+  function renderDriveFiles() {
+    const listEl = document.getElementById("drive-file-list");
+    const emptyEl = document.getElementById("drive-picker-empty");
+    listEl.innerHTML = "";
+    
+    // フィルタリング
+    let filtered = driveFilesCache;
+    if (currentDriveFilter === "pdf") {
+      filtered = driveFilesCache.filter(f => f.mimeType === "application/pdf");
+    } else if (currentDriveFilter === "image") {
+      filtered = driveFilesCache.filter(f => f.mimeType !== "application/pdf");
+    }
+    
+    if (filtered.length === 0) {
+      emptyEl.style.display = "block";
+      return;
+    }
+    emptyEl.style.display = "none";
+    
+    filtered.forEach(function(file) {
+      const isPdf = file.mimeType === "application/pdf";
+      const iconClass = isPdf ? "file-icon-pdf" : "file-icon-image";
+      const iconName = isPdf ? "file-text" : "image";
+      const dateStr = formatDriveTimestamp(file.lastUpdated);
+      
+      const itemEl = document.createElement("div");
+      itemEl.className = "drive-file-item";
+      if (selectedDriveFileId === file.id) {
+        itemEl.classList.add("selected");
+      }
+      
+      itemEl.innerHTML = `
+        <div class="file-icon-wrapper ${iconClass}">
+          <i data-lucide="${iconName}"></i>
+        </div>
+        <div class="file-details">
+          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+          <div class="file-date">${dateStr} 更新</div>
+        </div>
+        <div class="file-selected-indicator">
+          <i data-lucide="check-circle-2" style="width: 18px; height: 18px;"></i>
+        </div>
+      `;
+      
+      itemEl.addEventListener("click", function() {
+        selectDriveFile(file.id);
+      });
+      
+      listEl.appendChild(itemEl);
+    });
+    
+    // Lucideアイコンを再適用
+    lucide.createIcons();
+  }
+
+  function selectDriveFile(fileId) {
+    selectedDriveFileId = fileId;
+    
+    // 選択ハイライトの切り替え
+    const items = document.querySelectorAll("#drive-file-list .drive-file-item");
+    const filtered = driveFilesCache.filter(f => {
+      if (currentDriveFilter === "pdf") return f.mimeType === "application/pdf";
+      if (currentDriveFilter === "image") return f.mimeType !== "application/pdf";
+      return true;
+    });
+    
+    items.forEach((item, index) => {
+      const file = filtered[index];
+      if (file && file.id === fileId) {
+        item.classList.add("selected");
+      } else {
+        item.classList.remove("selected");
+      }
+    });
+    
+    // ボタンの無効化解除
+    document.getElementById("drive-picker-submit").disabled = false;
+  }
+
+  function searchDriveFiles() {
+    const input = document.getElementById("drive-search-input");
+    const queryText = input.value.trim();
+    
+    showDriveLoading(true);
+    google.script.run
+      .withSuccessHandler(function(response) {
+        showDriveLoading(false);
+        if (response.success) {
+          driveFilesCache = response.files;
+          selectedDriveFileId = null;
+          document.getElementById("drive-picker-submit").disabled = true;
+          renderDriveFiles();
+        } else {
+          alert(response.message);
+        }
+      })
+      .withFailureHandler(function(err) {
+        showDriveLoading(false);
+        alert("Googleドライブの検索に失敗しました: " + err.message);
+      })
+      .searchDriveFiles(queryText);
+  }
+
+  function setDriveFilter(type) {
+    currentDriveFilter = type;
+    updateFilterBtnActiveState();
+    renderDriveFiles();
+  }
+
+  function updateFilterBtnActiveState() {
+    const filters = ["all", "pdf", "image"];
+    filters.forEach(f => {
+      const btn = document.getElementById("filter-" + f);
+      if (btn) {
+        if (f === currentDriveFilter) {
+          btn.classList.add("active");
+        } else {
+          btn.classList.remove("active");
+        }
+      }
+    });
+  }
+
+  function analyzeSelectedDriveFile() {
+    if (!selectedDriveFileId) return;
+    
+    closeModal('drive-picker-modal');
+    
+    setTimeout(function() {
+      openModal('ocr-loading-modal');
+      document.getElementById('ocr-loading-title').textContent = 'Driveからファイルを読込中...';
+      document.getElementById('ocr-loading-desc').innerHTML = 'Googleドライブからデータを取得し、Geminiで解析しています。<br>数秒ほどお待ちください。';
+    }, 150);
+    
+    let clientKey = "";
+    try {
+      const stored = localStorage.getItem("_hk_session_data");
+      if (stored) clientKey = atob(stored);
+    } catch(e) {}
+    
+    google.script.run
+      .withSuccessHandler(onReceiptAnalyzed)
+      .withFailureHandler(onReceiptAnalysisFailed)
+      .analyzeDriveReceipt(selectedDriveFileId, clientKey);
+  }
+
+  function formatDriveTimestamp(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return `${d.getFullYear()}/${("0" + (d.getMonth() + 1)).slice(-2)}/${("0" + d.getDate()).slice(-2)} ${("0" + d.getHours()).slice(-2)}:${("0" + d.getMinutes()).slice(-2)}`;
+  }
+
+  // グローバルに露出
+  window.openSettlementModal = openSettlementModal;
+  window.onSettleStatusChange = onSettleStatusChange;
+  window.submitSettlementStatus = submitSettlementStatus;
+  window.openDriveFilePicker = openDriveFilePicker;
+  window.searchDriveFiles = searchDriveFiles;
+  window.setDriveFilter = setDriveFilter;
+  window.analyzeSelectedDriveFile = analyzeSelectedDriveFile;
+  window.selectDriveFile = selectDriveFile;
+  window.applyBulkSetting = applyBulkSetting;
+  window.removeBatchRow = removeBatchRow;
+</script>
